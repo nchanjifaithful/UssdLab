@@ -80,13 +80,18 @@ final class Sims {
                 @Override public void onReceiveUssdResponseFailed(TelephonyManager t, String req, int failureCode) {
                     String why = failureCode == TelephonyManager.USSD_ERROR_SERVICE_UNAVAIL
                             ? "USSD service unavailable on this SIM"
-                            : "The network returned an error (code " + failureCode + "). Try \"Use the dialler\".";
+                            : "This code can't be answered silently on this phone (error " + failureCode + "). It probably opens a menu.";
                     reply.onReply(false, why);
                 }
             }, new Handler(Looper.getMainLooper()));
         } catch (RuntimeException e) {
             reply.onReply(false, "Couldn't send: " + e.getMessage());
         }
+    }
+
+    /** Opens the dial pad with the code filled in. Needs no permission; the user presses call. */
+    static void dialPad(Context c, String code) {
+        c.startActivity(new Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", code, null)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
     }
 
     /** Dials a USSD code through the phone app, on the chosen SIM when possible. */
