@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="service_desc">Lets USSD Lab read USSD menu screens and type the replies you set up, so a multi-step menu (like mobile money) can run by itself. It acts only while a run you started is in progress and ignores all other apps. Nothing leaves your phone.</string>
+</resources>

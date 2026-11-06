@@ -1,0 +1,24 @@
+# Build output
+build/
+app/build/
+.gradle/
+*.apk
+*.aab
+*.idsig
+*.dex
+*.class
+
+# Signing
+*.keystore
+*.jks
+
+# Local config / IDE
+local.properties
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Source archive
+*.zip
