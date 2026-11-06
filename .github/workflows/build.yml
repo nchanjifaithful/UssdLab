@@ -38,6 +38,12 @@ jobs:
           echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
           echo "SIGNING_KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
 
+      - name: Require signing key for releases
+        if: startsWith(github.ref, 'refs/tags/v') && env.SIGNING_KEYSTORE_FILE == ''
+        run: |
+          echo "::error::SIGNING_KEYSTORE_BASE64 secret is missing; refusing to publish a release signed with a temporary key."
+          exit 1
+
       - name: Build release APK
         env:
           SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
@@ -48,7 +54,9 @@ jobs:
           cp app/build/outputs/apk/release/app-release.apk UssdLab.apk
 
       - name: Show signing certificate
-        run: keytool -printcert -jarfile UssdLab.apk | grep -E "Owner|SHA256"
+        run: |
+          APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner"
+          "$APKSIGNER" verify --print-certs UssdLab.apk | grep -E "DN|SHA-256"
 
       - uses: actions/upload-artifact@v5
         with:
