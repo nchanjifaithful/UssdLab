@@ -256,6 +256,14 @@ final class Ui {
         return t;
     }
 
+    /** Selectable chip with a leading icon (the check mark is replaced by the icon). */
+    TextView chip(int iconRes, String s, boolean selected, View.OnClickListener l) {
+        TextView t = chip(s, selected, l);
+        t.setText(s);
+        t.setPadding(dp(12), dp(6), dp(16), dp(6));
+        return iconText(t, iconRes);
+    }
+
     /** Small status pill, e.g. "Ready" or "Needed". */
     TextView badge(String s, int bg, int fg) {
         TextView t = text(s, 12, fg);
@@ -280,6 +288,121 @@ final class Ui {
         i.setImageTintList(ColorStateList.valueOf(tint));
         i.setLayoutParams(new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
         return i;
+    }
+
+    /** Round icon button (48dp touch target). bg 0 = transparent. */
+    ImageView iconButton(int res, int tint, int bg, String description, View.OnClickListener l) {
+        ImageView i = new ImageView(c);
+        i.setImageResource(res);
+        i.setImageTintList(ColorStateList.valueOf(tint));
+        i.setScaleType(ImageView.ScaleType.CENTER);
+        i.setBackground(ripple(bg, 24));
+        i.setContentDescription(description);
+        i.setOnClickListener(l);
+        i.setLayoutParams(new LinearLayout.LayoutParams(dp(44), dp(44)));
+        return i;
+    }
+
+    /** Icon inside a soft rounded square, used to lead list rows and tiles. */
+    View iconTile(int res, int bg, int fg, int sizeDp) {
+        android.widget.FrameLayout f = new android.widget.FrameLayout(c);
+        f.setBackground(shape(bg, sizeDp * 0.32f));
+        ImageView i = icon(res, fg, Math.round(sizeDp * 0.55f));
+        f.addView(i, new android.widget.FrameLayout.LayoutParams(dp(sizeDp * 0.55f), dp(sizeDp * 0.55f), Gravity.CENTER));
+        f.setLayoutParams(new LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp)));
+        return f;
+    }
+
+    /** Button with a leading icon. */
+    TextView iconText(TextView b, int res) {
+        android.graphics.drawable.Drawable d = c.getDrawable(res).mutate();
+        d.setTint(b.getCurrentTextColor());
+        d.setBounds(0, 0, dp(18), dp(18));
+        b.setCompoundDrawablesRelative(d, null, null, null);
+        b.setCompoundDrawablePadding(dp(8));
+        return b;
+    }
+
+    /** A settings-style row: icon, title, subtitle and an optional trailing view. */
+    LinearLayout listRow(int iconRes, String title, String sub, View trailing, View.OnClickListener l) {
+        LinearLayout r = row();
+        r.setPadding(dp(16), dp(14), dp(12), dp(14));
+        r.setMinimumHeight(dp(64));
+        if (iconRes != 0) r.addView(iconTile(iconRes, secondaryContainer, onSecondaryContainer, 40));
+        LinearLayout t = col();
+        t.setPadding(iconRes != 0 ? dp(16) : 0, 0, dp(8), 0);
+        t.addView(titleSmall(title));
+        if (sub != null && !sub.isEmpty()) {
+            TextView s = small(sub);
+            s.setPadding(0, dp(2), 0, 0);
+            t.addView(s);
+        }
+        r.addView(t, weight());
+        if (trailing != null) r.addView(trailing);
+        else if (l != null) r.addView(icon(R.drawable.ic_chevron, onSurfaceVariant, 22));
+        if (l != null) {
+            r.setBackground(ripple(0x00000000, 0));
+            r.setOnClickListener(l);
+        }
+        return r;
+    }
+
+    /** Rounded group of rows separated by hairlines (like iOS / Material settings). */
+    LinearLayout group(View... rows) {
+        LinearLayout g = col();
+        g.setBackground(shape(surfaceContainer, 24));
+        g.setClipToOutline(true);
+        for (int i = 0; i < rows.length; i++) {
+            if (rows[i] == null) continue;
+            if (g.getChildCount() > 0) {
+                View line = new View(c);
+                line.setBackgroundColor(outlineVariant);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(0.6f)));
+                lp.setMarginStart(dp(72));
+                g.addView(line, lp);
+            }
+            g.addView(rows[i], full());
+        }
+        return g;
+    }
+
+    /** Small grey section heading. */
+    TextView section(String s) {
+        TextView t = text(s, 13, onSurfaceVariant);
+        t.setTypeface(medium);
+        t.setPadding(dp(8), dp(24), dp(8), dp(8));
+        return t;
+    }
+
+    /** The USSD reply in a soft card, with any amounts and reference numbers as tags. */
+    static LinearLayout replyCard(Ui ui, String text) {
+        LinearLayout card = ui.card(ui.surfaceContainer);
+        TextView msg = ui.text(text == null ? "" : text, 16, ui.onSurface);
+        msg.setLineSpacing(0, 1.2f);
+        card.addView(msg);
+        java.util.List<String> amounts = Reply.amounts(text);
+        java.util.List<String> refs = Reply.references(text);
+        if (!amounts.isEmpty() || !refs.isEmpty()) {
+            android.widget.HorizontalScrollView hs = new android.widget.HorizontalScrollView(ui.c);
+            hs.setHorizontalScrollBarEnabled(false);
+            LinearLayout chips = ui.row();
+            for (String a : amounts) chips.addView(ui.badge(a, ui.primaryContainer, ui.onPrimaryContainer), ui.wrap(chips.getChildCount() == 0 ? 0 : 6));
+            for (String r : refs) chips.addView(ui.badge("Ref " + r, ui.tertiaryContainer, ui.onTertiaryContainer), ui.wrap(chips.getChildCount() == 0 ? 0 : 6));
+            hs.addView(chips);
+            LinearLayout.LayoutParams lp = ui.full(12);
+            card.addView(hs, lp);
+        }
+        return card;
+    }
+
+    static int modeIcon(String mode) {
+        switch (mode) {
+            case Store.SILENT: return R.drawable.ic_bolt;
+            case Store.AUTOPILOT: return R.drawable.ic_play;
+            case Store.PHONE: return R.drawable.ic_phone;
+            case Store.DIALPAD: return R.drawable.ic_dialpad;
+            default: return R.drawable.ic_layers;
+        }
     }
 
     // ---------------------------------------------------------------- fields

@@ -66,6 +66,14 @@ final class Sims {
         return out;
     }
 
+    /** The SIM chosen in the app, or the first one. */
+    static Sim selected(Context c) {
+        List<Sim> all = list(c);
+        int slot = Store.get(c).simSlot();
+        for (Sim s : all) if (s.slot == slot) return s;
+        return all.isEmpty() ? null : all.get(0);
+    }
+
     /** Android's built-in silent USSD: returns the first reply only. Works for codes like *155#. */
     @SuppressWarnings("MissingPermission")
     static void quick(Context c, String code, Sim sim, Reply reply) {

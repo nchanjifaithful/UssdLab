@@ -1,6 +1,6 @@
 # USSD Lab
 
-A small Android app (about 70 KB, no extra libraries, no internet permission) for exploring **every way a mobile app can work with USSD codes** like `*155#` or `*126#`. It's a working tool and a guide: each method is explained in plain language inside the app (the **Lab** tab) and below.
+A small Android app (about 100 KB, no extra libraries, no internet permission) for exploring **every way a mobile app can work with USSD codes** like `*155#` or `*126#`. It's a working tool and a guide: each method is explained in plain language inside the app (the **Lab** tab) and below.
 
 > **Status:** experimental. Built and signed with standalone tools and tested by its logic tests (50 cases), but USSD pop-ups look different on every phone brand, so expect to adjust things after testing on real devices.
 
@@ -12,29 +12,43 @@ Normally, buying airtime means: dial `*126#`, read a menu, type `1`, read anothe
 
 USSD Lab can do this instead:
 
-1. You tap **Send** (or a saved action).
-2. The phone opens the normal USSD pop-up, but **USSD Lab immediately draws its own full-screen design on top**, so you don't see the pop-up.
-3. Behind that screen, the app **reads each menu and types the answers** from your saved steps (pick "Airtime", type the amount…).
-4. When it needs you, it shows a **clean page**: the question, the options as big buttons, a keypad, or a **proper PIN screen** (screenshots blocked).
-5. Your answer is passed into the hidden pop-up. At the end you see the result, with any amounts and reference numbers picked out.
+1. You tap a command (in the app, on a shortcut or on the home-screen widget).
+2. The phone opens the normal USSD pop-up, but **USSD Lab immediately covers it** with a dark backdrop and its own **rounded sheet at the bottom of the screen**.
+3. Behind that, the app **reads each menu and types the answers** from your saved steps. The sheet shows a timeline: "Choose Airtime ✓ · Enter the amount ✓ · Enter your PIN…".
+4. When it needs you, the sheet shows the question, the options as large buttons, a phone-style keypad, or a **PIN pad** (dots only, screenshots blocked).
+5. Your answer goes into the hidden pop-up. The result appears on the same sheet, with amounts and reference numbers picked out, plus Copy and **Save as a command**.
 
 Two Android features make this possible:
 
 | Feature | What it does here |
 |---|---|
 | **Accessibility service** ("Automation" in the app) | Reads the text of the USSD pop-up and types into it / taps Send. |
-| **Accessibility overlay** (a "draw over other apps" layer that belongs to the accessibility service) | Paints USSD Lab's own screen above the pop-up. Because it comes from the accessibility service, no separate "Display over other apps" permission is needed. |
+| **Accessibility overlay** (a "draw over other apps" layer that belongs to the accessibility service) | Paints USSD Lab's sheet above the pop-up. No separate "Display over other apps" permission is needed. |
 
-**The custom screen can be switched off** (switch on the Send tab, also in Setup). When it's off, you see the phone's normal pop-up and saved steps are still typed for you. During a run, the **Phone view** button uncovers the pop-up for that run only.
+**The custom screen can be switched off** in Settings → *Custom screen over USSD*. When it's off you see the phone's pop-up, saved steps are still typed for you, and a small card at the bottom shows progress. During a run, *Show the phone's pop-up* uncovers it for that run only.
 
 ---
 
 ## The app, tab by tab
 
-- **Send**: pick the SIM, type a code, choose *how it should run*, press Send. Below that: the custom-screen switch, your saved **actions**, and the **last reply**.
-- **Lab**: one card per method (below), each with *How it works*, *Good for*, *What it needs*, *Watch out* and a *Try it* button.
-- **History**: every run, the reply, and (under "Show steps") each screen seen and each answer given. The PIN is never written here.
-- **Setup**: phone access, Automation, saved PIN (optional), Listen mode, the custom-screen switch, privacy notes.
+| Tab | What it's for |
+|---|---|
+| **Home** | Send any code, choose *how it runs*, pick the SIM (top right), and run your commands from a grid of tiles. Hold a tile for options: edit, show on widget, home-screen shortcut, share, delete. |
+| **Record** | The main way to make commands. Name it, enter the code, tap **Start recording**, tap through the menu once on USSD Lab's sheet, then **Save**. Also lists your recorded commands and lets you export/import them. |
+| **History** | Every reply grouped by day (Today, Yesterday…), with filters (All, Done, Stopped, Heard). Tap one for a bottom sheet with the full reply and the *conversation with the menu* shown as chat bubbles, plus Copy, Share and Run again. |
+| **Guide** | Every way an app can use USSD, in plain words, split into *Ways to run*, *Features* and *Beyond*. Each card has *How it works*, *Good for*, *What it needs*, *Watch out* and a *Try it* button. |
+| **Settings** | Phone access, Automation, the custom-screen switch, SIM, Listen mode, saved PIN, widget help, export/import, privacy. |
+
+The **latest reply sits at the bottom of the app**, just above the tabs (like a music "now playing" bar). Tap it to open the full reply.
+
+### Home-screen widget
+
+Long-press the home screen → **Widgets** → **USSD Lab**. It shows up to four commands (choose them with *Show on widget*) and the latest reply at the bottom.
+**Tapping a command runs it right there; the app doesn't open:**
+- *Silent* codes (like `*155#`) answer on the widget itself.
+- Menus open USSD Lab's sheet over the home screen; {PHONE}/{AMOUNT} are asked on the sheet's keypad first.
+- *Dial pad* commands open the dialler.
+Commands needing {PIN} ask on the secure PIN pad (a *saved* PIN needs the app for the fingerprint check).
 
 ### Ways to run a code ("How should it run?")
 
@@ -60,7 +74,7 @@ Steps are the answers to give, in order, separated by commas:
 
 Example: `@airtime, @myself, {AMOUNT}, {PIN}`
 
-**Don't know the steps?** Run the code on the custom screen with no steps, tap through once, then tap **Save these steps** at the end. The app records options as `@words`, numbers and amounts as `{PHONE}`/`{AMOUNT}`, and the PIN as `{PIN}` (never the digits).
+**Don't know the steps?** Use the **Record** tab: tap through once, then tap **Save**. The app records options as `@words`, numbers and amounts as `{PHONE}`/`{AMOUNT}`, and the PIN as `{PIN}` (never the digits).
 
 If a screen doesn't match (option not found, menu changed, too slow), automation stops and **hands over to you**: on the custom screen you get buttons and a keypad; in Auto-pilot you finish in the phone's pop-up.
 
@@ -121,8 +135,11 @@ If a screen doesn't match (option not found, menu changed, too slow), automation
 ### 11. Listen mode
 - **What:** saves the text of any USSD pop-up to History, even codes you dial yourself. Never taps or types.
 
-### 12. Home-screen shortcuts
-- **What:** pin an action to the home screen; one tap runs it.
+### 12. Home-screen widget
+- **What:** up to four commands on the home screen that run without opening the app; shows the latest reply.
+
+### 13. Home-screen shortcuts
+- **What:** pin a command to the home screen as its own icon; one tap runs it.
 
 ### Beyond this app
 - **SIM Toolkit menus:** some services live in the SIM menu app; could be automated similarly, not built here.
@@ -136,10 +153,11 @@ If a screen doesn't match (option not found, menu changed, too slow), automation
 ## Install and set up
 
 1. Download `UssdLab.apk` from the [latest release](https://github.com/nchanjifaithful/UssdLab/releases/latest) and install it (allow installs from your file manager when asked).
-2. **Setup → Phone access → Allow.**
-3. **Setup → Automation → Open settings →** Installed/Downloaded apps → USSD Lab → On.
+2. **Settings → Phone access → Allow.**
+3. **Settings → Automation → Open settings →** Installed/Downloaded apps → USSD Lab → On.
    On Android 13+, if the switch is greyed out: **App info → ⋮ → Allow restricted settings**, then try again.
-4. Optional: **Save PIN** (needs a screen lock).
+4. Optional: **Settings → Saved PIN** (needs a screen lock).
+5. Optional: add the widget.
 
 Signed with a self-made key: fine for your own phones, not for the Play Store.
 
@@ -156,26 +174,30 @@ Signed with a self-made key: fine for your own phones, not for the Play Store.
 
 | File | Role |
 |---|---|
-| `StepEngine.java` | Pure Java: parses steps, decides each reply, finds options, detects PIN screens, records routes. |
+| `StepEngine.java` | Pure Java: parses steps, decides each reply, finds options, detects PIN screens, records routes, describes steps. |
 | `Reply.java` | Pure Java: amounts and reference numbers in replies. |
 | `Job.java` | One run: steps, progress, recorded route, PIN (wiped after use), log. |
-| `UssdService.java` | Accessibility service: reads pop-ups, types answers, hands over, Listen mode. |
+| `UssdService.java` | Accessibility service: reads pop-ups, types answers, hands over, Listen mode, runs started from the widget. |
 | `Screen.java` | Reads a USSD pop-up (text, input box, buttons) and acts on it. |
-| `Skin.java` | The custom USSD interface (overlay): progress, options, keypad, PIN pad, result, banner. |
+| `Skin.java` | The custom USSD interface: bottom sheet with step timeline, options, keypad, PIN pad, value entry, result, bottom banner. |
+| `Widget.java` | Home-screen widget; runs commands without opening the app. |
 | `Sims.java` | SIM list, silent requests, dialling on a chosen SIM, dial pad. |
 | `PinVault.java` | Keystore-backed PIN storage. |
-| `Store.java` | Actions, settings, History (SharedPreferences). |
-| `Ui.java` | Tiny Material 3 kit on plain views; wallpaper colours on Android 12+. |
-| `Methods.java` | The Lab's text (mirrors this README). |
-| `MainActivity.java` | Send / Lab / History / Setup tabs and the action editor. |
+| `Store.java` | Commands, settings, History, export/import (SharedPreferences). |
+| `Ui.java`, `Sheet.java` | Tiny Material 3 kit on plain views (wallpaper colours on Android 12+) and an in-app bottom sheet. |
+| `MainActivity.java` | Tab host, bottom navigation, reply bar, sheets, and starting runs. |
+| `HomePage`, `RecordPage`, `HistoryPage`, `GuidePage`, `SettingsPage`, `EditorPage` | One file per screen. |
+| `Methods.java` | The Guide's text (mirrors this README). |
 
 **Build in Android Studio:** open the folder and Run (Gradle files included).
 
 **Build without Gradle** (what produced the APK): Java + `android.jar` + `aapt2` + `d8` + `apksigner`:
 
 ```
-AAPT2=… D8_JAR=… APKSIGNER_JAR=… ANDROID_JAR=… [ECJ_JAR=…] ./build.sh
+AAPT2=… D8_JAR=… APKSIGNER_JAR=… ANDROID_JAR=… [ECJ_JAR=…] [SHRINK=0] ./build.sh
 ```
+
+By default the build runs R8, which removes unused code (about a third smaller). `SHRINK=0` skips it.
 
 **Logic tests** (no Android needed):
 
@@ -184,4 +206,4 @@ javac -d /tmp/t app/src/main/java/app/ussdlab/{StepEngine,Job,Reply}.java app/sr
 java -cp /tmp/t app.ussdlab.StepEngineTest
 ```
 
-**Releases:** GitHub Actions builds and tests every push. Pushing a tag like `v0.3` publishes a release with `UssdLab.apk` attached. To sign releases with a fixed key, set the repo secrets `SIGNING_KEYSTORE_BASE64`, `SIGNING_STORE_PASSWORD`, `SIGNING_KEY_ALIAS` and `SIGNING_KEY_PASSWORD`.
+**Releases:** GitHub Actions builds and tests every push. Pushing a tag like `v0.4` publishes a release with `UssdLab.apk` attached, signed with the project's release key (stored as repo secrets `SIGNING_KEYSTORE_BASE64`, `SIGNING_STORE_PASSWORD`, `SIGNING_KEY_ALIAS`, `SIGNING_KEY_PASSWORD`).

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="w_bg">#FBF8FF</color>
+    <color name="w_tile">#DDE1FF</color>
+    <color name="w_on_tile">#001257</color>
+    <color name="w_text">#1B1B21</color>
+    <color name="w_sub">#45464F</color>
+    <color name="w_reply">#EFEDF4</color>
+    <color name="w_accent">#3755C3</color>
+</resources>

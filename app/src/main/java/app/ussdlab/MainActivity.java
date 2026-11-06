@@ -2,7 +2,7 @@ package app.ussdlab;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.app.KeyguardManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -15,11 +15,9 @@ import android.graphics.Typeface;
 import android.graphics.drawable.Icon;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.CancellationSignal;
-import android.provider.Settings;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.text.format.DateUtils;
@@ -29,9 +27,7 @@ import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.PopupMenu;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -41,23 +37,28 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+/** Hosts the five tabs, the reply bar, bottom sheets, and everything that starts a run. */
 public class MainActivity extends Activity {
 
     static final String EXTRA_RUN = "run_action";
+    static final String EXTRA_TAB = "tab";
+    static final int HOME = 0, RECORD = 1, HISTORY = 2, GUIDE = 3, SETTINGS = 4;
     private static final int REQ_PERMS = 1;
     private static final int REQ_KEYGUARD = 2;
-    private static final String[] TABS = {"Send", "Lab", "History", "Setup"};
-    private static final int[] TAB_ICONS = {R.drawable.ic_send, R.drawable.ic_lab, R.drawable.ic_history, R.drawable.ic_setup};
+    private static final String[] TABS = {"Home", "Record", "History", "Guide", "Settings"};
+    private static final int[] TAB_ICONS = {R.drawable.ic_home, R.drawable.ic_record, R.drawable.ic_history, R.drawable.ic_guide, R.drawable.ic_settings};
 
-    private Ui ui;
-    private Store store;
+    Ui ui;
+    Store store;
     private FrameLayout content;
+    private LinearLayout replyBar;
     private LinearLayout nav;
-    private int tab;
-    private boolean editorOpen;
-    private List<Sims.Sim> sims = new ArrayList<>();
+    int tab;
+    boolean editorOpen;
     private Runnable afterAuth;
     private Runnable afterPerms;
+    private final int[] scroll = new int[5];
+    private ScrollView currentScroll;
 
     // --------------------------------------------------------------- lifecycle
 
@@ -74,10 +75,12 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(ui.surface);
         content = new FrameLayout(this);
         root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        replyBar = ui.row();
+        root.addView(replyBar, ui.full());
         nav = ui.row();
         nav.setBackgroundColor(ui.surfaceContainer);
-        nav.setPadding(0, ui.dp(10), 0, ui.dp(14));
-        root.addView(nav, ui.full());
+        nav.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(nav, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ui.dp(80)));
         setContentView(root);
         handleIntent(getIntent());
     }
@@ -95,50 +98,52 @@ public class MainActivity extends Activity {
 
     @Override public void onBackPressed() {
         if (editorOpen) closeEditor();
-        else if (tab != 0) showTab(0);
+        else if (tab != HOME) showTab(HOME);
         else super.onBackPressed();
     }
 
     private void handleIntent(Intent i) {
         if (i == null) return;
         String runId = i.getStringExtra(EXTRA_RUN);
-        String route = i.getStringExtra(UssdService.EXTRA_ROUTE);
+        int t = i.getIntExtra(EXTRA_TAB, -1);
         i.removeExtra(EXTRA_RUN);
-        i.removeExtra(UssdService.EXTRA_ROUTE);
+        i.removeExtra(EXTRA_TAB);
+        if (t >= 0) tab = t;
         if (runId != null) {
             Store.Action a = store.action(runId);
             if (a != null) content.post(() -> run(a));
-        } else if (route != null) {
-            Store.Action a = Store.Action.make(i.getStringExtra(UssdService.EXTRA_ROUTE_TITLE) + " (recorded)",
-                    i.getStringExtra(UssdService.EXTRA_ROUTE_CODE), route, Store.CUSTOM);
-            content.post(() -> openEditor(a, true));
         }
     }
 
     // -------------------------------------------------------------- navigation
 
-    private void showTab(int t) {
+    void showTab(int t) {
+        if (currentScroll != null && !editorOpen) scroll[tab] = currentScroll.getScrollY();
         tab = t;
         editorOpen = false;
         nav.setVisibility(View.VISIBLE);
         renderNav();
         LinearLayout page = ui.col();
-        page.setPadding(ui.dp(20), ui.dp(28), ui.dp(20), ui.dp(32));
+        page.setPadding(ui.dp(16), ui.dp(12), ui.dp(16), ui.dp(28));
         switch (t) {
-            case 1: buildLab(page); break;
-            case 2: buildHistory(page); break;
-            case 3: buildSetup(page); break;
-            default: buildSend(page); break;
+            case RECORD: RecordPage.build(this, page); break;
+            case HISTORY: HistoryPage.build(this, page); break;
+            case GUIDE: GuidePage.build(this, page); break;
+            case SETTINGS: SettingsPage.build(this, page); break;
+            default: HomePage.build(this, page); break;
         }
-        setPage(page);
+        setPage(page, scroll[t]);
+        renderReplyBar();
     }
 
-    private void setPage(View page) {
+    void setPage(View page, int scrollY) {
         ScrollView sv = new ScrollView(this);
         sv.setFillViewport(true);
         sv.addView(page);
         content.removeAllViews();
         content.addView(sv);
+        currentScroll = sv;
+        if (scrollY > 0) sv.post(() -> sv.scrollTo(0, scrollY));
     }
 
     private void renderNav() {
@@ -147,650 +152,244 @@ public class MainActivity extends Activity {
             final int idx = i;
             boolean sel = i == tab;
             LinearLayout item = ui.col();
-            item.setGravity(Gravity.CENTER_HORIZONTAL);
+            item.setGravity(Gravity.CENTER);
             FrameLayout pill = new FrameLayout(this);
-            pill.setBackground(ui.shape(sel ? ui.secondaryContainer : 0x00000000, 16));
-            View ic = ui.icon(TAB_ICONS[i], sel ? ui.onSecondaryContainer : ui.onSurfaceVariant, 24);
-            FrameLayout.LayoutParams ilp = new FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER);
-            pill.addView(ic, ilp);
+            pill.setBackground(ui.ripple(sel ? ui.secondaryContainer : 0x00000000, 16));
+            pill.addView(ui.icon(TAB_ICONS[i], sel ? ui.onSecondaryContainer : ui.onSurfaceVariant, 24),
+                    new FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.CENTER));
+            pill.setOnClickListener(v -> showTab(idx));
             item.addView(pill, new LinearLayout.LayoutParams(ui.dp(64), ui.dp(32)));
             TextView l = ui.text(TABS[i], 12, sel ? ui.onSurface : ui.onSurfaceVariant);
-            if (sel) l.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            l.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            l.setGravity(Gravity.CENTER);
             l.setPadding(0, ui.dp(4), 0, 0);
             item.addView(l);
             item.setOnClickListener(v -> showTab(idx));
-            item.setContentDescription(TABS[i]);
-            nav.addView(item, Ui.weight());
+            item.setContentDescription(TABS[i] + (sel ? ", selected" : ""));
+            nav.addView(item, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1));
         }
     }
 
-    private void header(LinearLayout page, String title, String intro) {
-        page.addView(ui.display(title));
-        TextView t = ui.body(intro);
-        t.setPadding(0, ui.dp(8), 0, ui.dp(4));
-        page.addView(t);
-    }
-
-    // ---------------------------------------------------------------- Send tab
-
-    private void buildSend(LinearLayout page) {
-        header(page, "USSD Lab", "Send USSD codes the way you want, and see every way an app can work with them.");
-
-        boolean perms = phoneOk();
-        boolean auto = serviceOn();
-        if (!perms || !auto) {
-            LinearLayout c = ui.card(ui.tertiaryContainer);
-            TextView h = ui.titleSmall("Finish setting up");
-            h.setTextColor(ui.onTertiaryContainer);
-            c.addView(h);
-            TextView b = ui.text((perms ? "" : "• Allow phone access so the app can dial codes.\n")
-                    + (auto ? "" : "• Turn on Automation for menus and the custom screen."), 14, ui.onTertiaryContainer);
-            b.setPadding(0, ui.dp(6), 0, ui.dp(10));
-            c.addView(b);
-            c.addView(ui.filled("Go to Setup", v -> showTab(3)), ui.wrap(0));
-            page.addView(c, ui.full(16));
+    /** The latest USSD reply, docked above the tabs like a "now playing" bar. */
+    void renderReplyBar() {
+        replyBar.removeAllViews();
+        Store.Run r = store.lastRun();
+        if (r == null || tab == HISTORY || editorOpen) {
+            replyBar.setVisibility(View.GONE);
+            return;
         }
-
-        page.addView(ui.label("SIM"));
-        sims = Sims.list(this);
-        if (sims.isEmpty()) {
-            page.addView(ui.small(perms ? "No SIM found. The phone's default SIM will be used." : "Allow phone access in Setup to choose a SIM."));
-        } else {
-            int saved = selectedSlot();
-            View[] chips = new View[sims.size()];
-            for (int i = 0; i < sims.size(); i++) {
-                Sims.Sim s = sims.get(i);
-                chips[i] = ui.chip(s.label, s.slot == saved, v -> {
-                    store.setSimSlot(s.slot);
-                    showTab(0);
-                });
-            }
-            page.addView(ui.chipRow(chips));
-            TextView h = ui.small("Codes are sent from this SIM.");
-            h.setPadding(ui.dp(4), ui.dp(6), 0, 0);
-            page.addView(h);
-        }
-
-        page.addView(ui.label("Send a code"));
-        LinearLayout card = ui.card();
-        EditText code = ui.codeField("e.g. *155#");
-        code.setText(store.quickCode());
-        card.addView(code, ui.full());
-        TextView how = ui.text("How should it run?", 14, ui.onSurface);
-        how.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        how.setPadding(ui.dp(2), ui.dp(16), 0, ui.dp(8));
-        card.addView(how);
-        String mode = store.quickMode();
-        View[] modeChips = new View[Store.MODES.length];
-        for (int i = 0; i < Store.MODES.length; i++) {
-            String m = Store.MODES[i];
-            modeChips[i] = ui.chip(Store.modeName(m), m.equals(mode), v -> {
-                store.setQuick(code.getText().toString().trim(), m);
-                showTab(0);
-            });
-        }
-        card.addView(ui.chipRow(modeChips));
-        TextView help = ui.small(Store.modeHelp(mode));
-        help.setPadding(ui.dp(2), ui.dp(10), 0, ui.dp(14));
-        card.addView(help);
-        card.addView(ui.filled("Send", v -> {
-            String c = code.getText().toString().trim();
-            store.setQuick(c, mode);
-            Store.Action a = Store.Action.make(c, c, "", mode);
-            run(a);
-        }), ui.full());
-        page.addView(card, ui.full());
-        page.addView(coverToggle(true), ui.full(10));
-
-        LinearLayout ah = ui.row();
-        TextView al = ui.label("Your actions");
-        ah.addView(al, Ui.weight());
-        TextView add = ui.textButton("+ New", v -> openEditor(Store.Action.make("", "", "", Store.CUSTOM), true));
-        ah.addView(add);
-        page.addView(ah, ui.full());
-        TextView ahelp = ui.small("Saved codes, with optional steps the app answers for you. Tap to run, hold for more.");
-        ahelp.setPadding(ui.dp(4), 0, 0, ui.dp(8));
-        page.addView(ahelp);
-        for (Store.Action a : store.actions()) page.addView(actionCard(a), ui.full(8));
-
-        List<Store.Run> runs = store.runs();
-        if (!runs.isEmpty()) {
-            page.addView(ui.label("Last reply"));
-            page.addView(runCard(runs.get(0), false), ui.full());
-        }
-    }
-
-    private View actionCard(Store.Action a) {
-        LinearLayout c = ui.row();
-        c.setPadding(ui.dp(18), ui.dp(14), ui.dp(8), ui.dp(14));
-        c.setBackground(ui.ripple(ui.surfaceContainer, 20));
-        LinearLayout txt = ui.col();
-        TextView t = ui.titleSmall(a.title());
-        t.setSingleLine(true);
-        t.setEllipsize(TextUtils.TruncateAt.END);
-        txt.addView(t);
-        int n = StepEngine.parse(a.steps).size();
-        txt.addView(ui.small(a.code + "  ·  " + Store.modeName(a.mode) + (n > 0 ? "  ·  " + n + " steps" : "")));
-        c.addView(txt, Ui.weight());
-        TextView more = ui.text("⋮", 22, ui.onSurfaceVariant);
-        more.setGravity(Gravity.CENTER);
-        more.setContentDescription("More options for " + a.title());
-        more.setBackground(ui.ripple(0x00000000, 20));
-        more.setOnClickListener(v -> actionMenu(v, a));
-        c.addView(more, new LinearLayout.LayoutParams(ui.dp(44), ui.dp(44)));
-        c.setOnClickListener(v -> run(a));
-        c.setOnLongClickListener(v -> {
-            actionMenu(more, a);
-            return true;
-        });
-        return c;
-    }
-
-    private void actionMenu(View anchor, Store.Action a) {
-        PopupMenu pm = new PopupMenu(this, anchor);
-        pm.getMenu().add(0, 1, 0, "Run");
-        pm.getMenu().add(0, 2, 1, "Edit");
-        pm.getMenu().add(0, 3, 2, "Add to home screen");
-        pm.getMenu().add(0, 4, 3, "Delete");
-        pm.setOnMenuItemClickListener(item -> {
-            switch (item.getItemId()) {
-                case 1: run(a); break;
-                case 2: openEditor(a, false); break;
-                case 3: pinShortcut(a); break;
-                case 4:
-                    store.delete(a.id);
-                    showTab(0);
-                    break;
-            }
-            return true;
-        });
-        pm.show();
-    }
-
-    private View runCard(Store.Run r, boolean expandable) {
-        LinearLayout c = ui.card();
-        LinearLayout top = ui.row();
-        String tag = "listen".equals(r.mode) ? "Heard" : r.ok ? "Done" : "Stopped";
-        int bg = "listen".equals(r.mode) ? ui.secondaryContainer : r.ok ? ui.successContainer : ui.errorContainer;
-        int fg = "listen".equals(r.mode) ? ui.onSecondaryContainer : r.ok ? ui.onSuccessContainer : ui.onErrorContainer;
-        top.addView(ui.badge(tag, bg, fg));
-        TextView when = ui.small("  " + DateUtils.getRelativeTimeSpanString(r.time, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS));
-        top.addView(when, Ui.weight());
-        c.addView(top);
-        TextView t = ui.titleSmall(r.title);
-        t.setPadding(0, ui.dp(10), 0, ui.dp(4));
-        c.addView(t);
-        TextView res = ui.text(r.result, 16, ui.onSurface);
-        res.setTextIsSelectable(!expandable);
-        if (expandable) {
-            res.setMaxLines(3);
-            res.setEllipsize(TextUtils.TruncateAt.END);
-        }
-        c.addView(res);
-        List<String> amounts = Reply.amounts(r.result);
-        List<String> refs = Reply.references(r.result);
-        if (!amounts.isEmpty() || !refs.isEmpty()) {
-            LinearLayout chips = ui.row();
-            chips.setPadding(0, ui.dp(10), 0, 0);
-            for (String a : amounts) chips.addView(ui.badge(a, ui.primaryContainer, ui.onPrimaryContainer), ui.wrap(chips.getChildCount() == 0 ? 0 : 6));
-            for (String x : refs) chips.addView(ui.badge("Ref " + x, ui.tertiaryContainer, ui.onTertiaryContainer), ui.wrap(chips.getChildCount() == 0 ? 0 : 6));
-            c.addView(chips);
-        }
-        LinearLayout actions = ui.row();
-        actions.setPadding(0, ui.dp(6), 0, 0);
-        actions.addView(ui.textButton("Copy reply", v -> copy(r.result, "Reply copied")));
-        if (expandable && !r.log.isEmpty()) {
-            TextView log = ui.mono(r.log);
-            log.setVisibility(View.GONE);
-            log.setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(10));
-            log.setBackground(ui.shape(ui.surface, 14));
-            TextView toggle = ui.textButton("Show steps", null);
-            toggle.setOnClickListener(v -> {
-                boolean show = log.getVisibility() != View.VISIBLE;
-                log.setVisibility(show ? View.VISIBLE : View.GONE);
-                res.setMaxLines(show ? Integer.MAX_VALUE : 3);
-                toggle.setText(show ? "Hide steps" : "Show steps");
-            });
-            actions.addView(toggle);
-            c.addView(actions);
-            c.addView(log, ui.full(4));
-        } else {
-            if (!expandable) actions.addView(ui.textButton("All history", v -> showTab(2)));
-            c.addView(actions);
-        }
-        return c;
-    }
-
-    // ----------------------------------------------------------------- Lab tab
-
-    private void buildLab(LinearLayout page) {
-        header(page, "The lab", "There are several ways an app can work with USSD. Each card explains one in plain words: what it does, how it works, what it's good for and what to watch out for. Tap a card to open it.");
-        for (int i = 0; i < Methods.ALL.length; i++) page.addView(methodCard(i + 1, Methods.ALL[i]), ui.full(10));
-        page.addView(ui.label("Beyond this app"));
-        TextView intro = ui.small("Other parts of the USSD world, and why they aren't in this app.");
-        intro.setPadding(ui.dp(4), 0, 0, ui.dp(8));
-        page.addView(intro);
-        for (String[] b : Methods.BEYOND) {
-            LinearLayout c = ui.card(ui.surfaceLow);
-            c.addView(ui.titleSmall(b[0]));
-            TextView d = ui.body(b[1]);
-            d.setPadding(0, ui.dp(6), 0, 0);
-            c.addView(d);
-            page.addView(c, ui.full(8));
-        }
-    }
-
-    private View methodCard(int n, Methods.Method m) {
-        LinearLayout c = ui.card();
-        LinearLayout top = ui.row();
-        TextView num = ui.text(String.valueOf(n), 15, ui.onPrimaryContainer);
-        num.setGravity(Gravity.CENTER);
-        num.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        num.setBackground(ui.shape(ui.primaryContainer, 18));
-        top.addView(num, new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36)));
-        LinearLayout txt = ui.col();
-        txt.setPadding(ui.dp(14), 0, ui.dp(8), 0);
-        txt.addView(ui.titleSmall(m.title));
-        txt.addView(ui.small(m.tagline));
-        top.addView(txt, Ui.weight());
-        TextView chev = ui.text("⌄", 20, ui.onSurfaceVariant);
-        top.addView(chev);
-        c.addView(top);
-
-        LinearLayout details = ui.col();
-        details.setVisibility(View.GONE);
-        details.setPadding(0, ui.dp(8), 0, 0);
-        section(details, "How it works", m.how);
-        section(details, "Good for", m.goodFor);
-        section(details, "What it needs", m.needs);
-        section(details, "Watch out", m.watchOut);
-        if (m.tryLabel != null) {
-            details.addView(ui.space(14));
-            details.addView(ui.tonal(m.tryLabel, v -> tryMethod(m.id)), ui.wrap(0));
-        }
-        c.addView(details);
-        c.setOnClickListener(v -> {
-            boolean open = details.getVisibility() != View.VISIBLE;
-            details.setVisibility(open ? View.VISIBLE : View.GONE);
-            chev.setText(open ? "⌃" : "⌄");
-        });
-        return c;
-    }
-
-    private void section(LinearLayout parent, String head, String body) {
-        TextView h = ui.text(head, 13, ui.primary);
-        h.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        h.setPadding(0, ui.dp(12), 0, ui.dp(2));
-        parent.addView(h);
-        parent.addView(ui.body(body));
-    }
-
-    private void tryMethod(String id) {
-        switch (id) {
-            case "silent": run(Store.Action.make("Silent *155#", "*155#", "", Store.SILENT)); break;
-            case "phone": run(Store.Action.make("*126# in the pop-up", "*126#", "", Store.PHONE)); break;
-            case "dialpad": run(Store.Action.make("Dial pad *126#", "*126#", "", Store.DIALPAD)); break;
-            case "autopilot": run(Store.Action.make("Auto-pilot test", "*126#", "@airtime", Store.AUTOPILOT)); break;
-            case "custom": run(Store.Action.make("*126# on the custom screen", "*126#", "", Store.CUSTOM)); break;
-            case "hybrid": run(Store.Action.make("Buy airtime (example)", "*126#", "@airtime, @myself, {AMOUNT}, {PIN}", Store.CUSTOM)); break;
-            case "record": run(Store.Action.make("Recording *126#", "*126#", "", Store.CUSTOM)); break;
-            default: showTab(3); break;
-        }
-    }
-
-    // ------------------------------------------------------------- History tab
-
-    private void buildHistory(LinearLayout page) {
-        header(page, "History", "Every run and what the network replied. Tap \"Show steps\" to see each screen and each answer. Your PIN never appears here.");
-        List<Store.Run> runs = store.runs();
-        LinearLayout bar = ui.row();
-        bar.setPadding(0, ui.dp(8), 0, ui.dp(4));
-        bar.addView(ui.outlined("Copy all", v -> {
-            StringBuilder sb = new StringBuilder();
-            for (Store.Run r : store.runs()) sb.append("── ").append(r.title).append('\n').append(r.log.isEmpty() ? r.result : r.log).append('\n');
-            copy(sb.toString(), "History copied");
-        }));
-        bar.addView(ui.textButton("Clear", v -> {
-            store.clearRuns();
-            showTab(2);
-        }), ui.wrap(8));
-        page.addView(bar);
-        if (runs.isEmpty()) {
-            LinearLayout c = ui.card(ui.surfaceLow);
-            c.addView(ui.titleSmall("Nothing yet"));
-            TextView t = ui.body("Run a code from the Send tab and the reply will show up here. Turn on Listen mode in Setup to also keep replies from codes you dial yourself.");
-            t.setPadding(0, ui.dp(6), 0, 0);
-            c.addView(t);
-            page.addView(c, ui.full(12));
-        }
-        for (Store.Run r : runs) page.addView(runCard(r, true), ui.full(10));
-    }
-
-    // --------------------------------------------------------------- Setup tab
-
-    private void buildSetup(LinearLayout page) {
-        header(page, "Setup", "Two switches make everything work, and one is optional. Each is explained below.");
-
-        boolean perms = phoneOk();
-        LinearLayout c1 = stepCard(1, "Phone access", perms,
-                "Lets USSD Lab dial codes and see which SIMs you have. Nothing is sent anywhere.");
-        if (!perms) c1.addView(ui.filled("Allow", v -> askPerms(() -> showTab(3))), ui.wrap(0));
-        page.addView(c1, ui.full(16));
-
-        boolean auto = serviceOn();
-        LinearLayout c2 = stepCard(2, "Automation", auto,
-                "Lets USSD Lab read the USSD pop-up and type answers for you. This is what powers Auto-pilot, the Custom screen, recording and Listen mode. It only acts while a run you started is going (or, with Listen mode, only copies text).");
-        if (!auto) {
-            TextView how = ui.small("In the next screen: Installed apps (or Downloaded apps) → USSD Lab → turn it on."
-                    + (Build.VERSION.SDK_INT >= 33 ? "\n\nSwitch greyed out? Open App info → ⋮ (top right) → Allow restricted settings, then try again. Android does this for apps installed from a file." : ""));
-            how.setPadding(0, 0, 0, ui.dp(12));
-            c2.addView(how);
-            LinearLayout r = ui.row();
-            r.addView(ui.filled("Open settings", v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
-            r.addView(ui.textButton("App info", v -> startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    Uri.fromParts("package", getPackageName(), null)))), ui.wrap(8));
-            c2.addView(r);
-        }
-        page.addView(c2, ui.full(10));
-
-        boolean hasPin = PinVault.has(this);
-        LinearLayout c3 = stepCard(3, "Saved PIN (optional)", hasPin,
-                hasPin ? "Your PIN is saved, encrypted on this phone. It only unlocks with your fingerprint or screen lock, and only for actions where you turn on \"Fill in my PIN\"."
-                        : "Not saved. When a menu asks for your PIN, you type it on USSD Lab's PIN screen and it isn't kept. Save it only if you want runs to finish by themselves.");
-        TextView warn = ui.small("Check that your mobile money provider allows apps to store or enter your PIN.");
-        warn.setPadding(0, 0, 0, ui.dp(12));
-        c3.addView(warn);
-        LinearLayout pr = ui.row();
-        pr.addView(hasPin ? ui.outlined("Change PIN", v -> savePinFlow()) : ui.tonal("Save PIN", v -> savePinFlow()));
-        if (hasPin) pr.addView(ui.textButton("Remove", v -> {
-            PinVault.clear(this);
-            toast("PIN removed");
-            showTab(3);
-        }), ui.wrap(8));
-        c3.addView(pr);
-        page.addView(c3, ui.full(10));
-
-        page.addView(ui.label("Extras"));
-        page.addView(coverToggle(true), ui.full());
-        LinearLayout c4 = ui.card();
-        LinearLayout r4 = ui.row();
-        LinearLayout t4 = ui.col();
-        t4.addView(ui.titleSmall("Listen mode"));
-        TextView d4 = ui.small("Keep a copy of every USSD reply in History, even for codes you dial yourself. Never taps or types.");
-        d4.setPadding(0, ui.dp(4), ui.dp(12), 0);
-        t4.addView(d4);
-        r4.addView(t4, Ui.weight());
-        Switch sw = new Switch(this);
-        sw.setChecked(store.listen());
-        sw.setOnCheckedChangeListener((s, on) -> {
-            store.setListen(on);
-            if (on && !serviceOn()) toast("Turn on Automation too, so Listen mode can see the pop-ups");
-        });
-        r4.addView(sw);
-        c4.addView(r4);
-        page.addView(c4, ui.full(10));
-
-        LinearLayout c5 = ui.card(ui.surfaceLow);
-        c5.addView(ui.titleSmall("Privacy"));
-        TextView p = ui.body("USSD Lab has no internet permission, so nothing it reads can leave your phone. Actions, History and the encrypted PIN stay in the app's private storage and are removed if you uninstall it.");
-        p.setPadding(0, ui.dp(6), 0, 0);
-        c5.addView(p);
-        page.addView(c5, ui.full(10));
-
-        LinearLayout c6 = ui.card(ui.surfaceLow);
-        c6.addView(ui.titleSmall("About"));
-        TextView ab = ui.body("USSD Lab 0.2 · a lightweight lab and guide for USSD on Android. No ads, no tracking, no extra libraries.");
-        ab.setPadding(0, ui.dp(6), 0, 0);
-        c6.addView(ab);
-        page.addView(c6, ui.full(10));
-    }
-
-    /** The on/off switch for drawing the custom screen over the USSD pop-up. */
-    private View coverToggle(boolean inCard) {
-        LinearLayout c = inCard ? ui.card() : ui.col();
-        LinearLayout r = ui.row();
+        replyBar.setVisibility(View.VISIBLE);
+        replyBar.setPadding(ui.dp(12), ui.dp(6), ui.dp(12), ui.dp(8));
+        LinearLayout card = ui.row();
+        card.setPadding(ui.dp(10), ui.dp(8), ui.dp(4), ui.dp(8));
+        card.setBackground(ui.ripple(ui.surfaceHigh, 20));
+        card.setElevation(ui.dp(2));
+        card.addView(statusTile(r, 36));
         LinearLayout t = ui.col();
-        t.addView(ui.titleSmall("Custom screen over USSD"));
-        TextView d = ui.small(store.cover()
-                ? "On: USSD Lab draws its own screen over the USSD pop-up, so you see clear buttons, a keypad and a PIN screen instead."
-                : "Off: you see the phone's normal USSD pop-up. Saved steps are still typed for you, and you finish anything else in the pop-up.");
-        d.setPadding(0, ui.dp(4), ui.dp(12), 0);
-        t.addView(d);
-        r.addView(t, Ui.weight());
-        Switch sw = new Switch(this);
-        sw.setChecked(store.cover());
-        sw.setContentDescription("Custom screen over USSD");
-        sw.setOnCheckedChangeListener((s, on) -> {
-            store.setCover(on);
-            toast(on ? "Custom screen on" : "Custom screen off — you'll see the phone's pop-up");
-            content.post(() -> { if (!editorOpen) showTab(tab); });
-        });
-        r.addView(sw);
-        c.addView(r);
-        return c;
+        t.setPadding(ui.dp(12), 0, ui.dp(4), 0);
+        TextView title = ui.text(r.title + "  ·  " + ago(r.time), 12, ui.onSurfaceVariant);
+        title.setSingleLine(true);
+        title.setEllipsize(TextUtils.TruncateAt.END);
+        t.addView(title);
+        TextView reply = ui.text(r.result.replace('\n', ' '), 14, ui.onSurface);
+        reply.setSingleLine(true);
+        reply.setEllipsize(TextUtils.TruncateAt.END);
+        t.addView(reply);
+        card.addView(t, Ui.weight());
+        card.addView(ui.iconButton(R.drawable.ic_copy, ui.onSurfaceVariant, 0x00000000, "Copy reply", v -> copy(r.result, "Reply copied")));
+        card.setOnClickListener(v -> HistoryPage.showDetail(this, r));
+        card.setContentDescription("Last reply from " + r.title + ": " + r.result);
+        replyBar.addView(card, Ui.weight());
     }
 
-    private LinearLayout stepCard(int n, String title, boolean ok, String body) {
-        LinearLayout c = ui.card();
-        LinearLayout top = ui.row();
-        TextView num = ui.text(ok ? "✓" : String.valueOf(n), 15, ok ? ui.onSuccessContainer : ui.onPrimaryContainer);
-        num.setGravity(Gravity.CENTER);
-        num.setBackground(ui.shape(ok ? ui.successContainer : ui.primaryContainer, 18));
-        top.addView(num, new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36)));
-        TextView t = ui.titleSmall(title);
-        t.setPadding(ui.dp(14), 0, 0, 0);
-        top.addView(t, Ui.weight());
-        top.addView(ok ? ui.badge("Ready", ui.successContainer, ui.onSuccessContainer) : ui.badge("Not set", ui.surfaceHigh, ui.onSurfaceVariant));
-        c.addView(top);
-        TextView b = ui.body(body);
-        b.setPadding(0, ui.dp(10), 0, ui.dp(12));
-        c.addView(b);
-        return c;
+    View statusTile(Store.Run r, int size) {
+        boolean heard = "listen".equals(r.mode);
+        int icon = heard ? R.drawable.ic_eye : r.ok ? R.drawable.ic_check : R.drawable.ic_alert;
+        int bg = heard ? ui.secondaryContainer : r.ok ? ui.successContainer : ui.errorContainer;
+        int fg = heard ? ui.onSecondaryContainer : r.ok ? ui.onSuccessContainer : ui.onErrorContainer;
+        return ui.iconTile(icon, bg, fg, size);
+    }
+
+    static String ago(long time) {
+        return DateUtils.getRelativeTimeSpanString(time, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString();
+    }
+
+    /** Large page title with an optional subtitle and trailing buttons. */
+    void appBar(LinearLayout page, String title, String subtitle, View... trailing) {
+        LinearLayout r = ui.row();
+        r.setPadding(ui.dp(4), ui.dp(12), 0, ui.dp(12));
+        LinearLayout t = ui.col();
+        TextView h = ui.text(title, 30, ui.onSurface);
+        t.addView(h);
+        if (subtitle != null) {
+            TextView s = ui.body(subtitle);
+            s.setPadding(0, ui.dp(2), 0, 0);
+            t.addView(s);
+        }
+        r.addView(t, Ui.weight());
+        for (View v : trailing) if (v != null) r.addView(v);
+        page.addView(r, ui.full());
     }
 
     // ------------------------------------------------------------------ editor
 
-    private void openEditor(Store.Action a, boolean isNew) {
+    void openEditor(Store.Action a, boolean isNew) {
+        if (currentScroll != null) scroll[tab] = currentScroll.getScrollY();
         editorOpen = true;
         nav.setVisibility(View.GONE);
+        replyBar.setVisibility(View.GONE);
         LinearLayout page = ui.col();
-        page.setPadding(ui.dp(12), ui.dp(16), ui.dp(20), ui.dp(32));
-
-        LinearLayout bar = ui.row();
-        TextView back = ui.text("←", 24, ui.onSurface);
-        back.setGravity(Gravity.CENTER);
-        back.setBackground(ui.ripple(0x00000000, 24));
-        back.setContentDescription("Back");
-        back.setOnClickListener(v -> closeEditor());
-        bar.addView(back, new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
-        TextView title = ui.title(isNew && a.name.isEmpty() ? "New action" : "Edit action");
-        title.setPadding(ui.dp(8), 0, 0, 0);
-        bar.addView(title);
-        page.addView(bar);
-
-        LinearLayout form = ui.col();
-        form.setPadding(ui.dp(8), 0, 0, 0);
-        page.addView(form);
-
-        EditText name = ui.field("e.g. Buy airtime", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-        name.setText(a.name);
-        form.addView(ui.labelled("Name", name, "What you'll see in your list."));
-
-        EditText code = ui.codeField("e.g. *126#");
-        code.setText(a.code);
-        form.addView(ui.labelled("Code", code, "The code you would normally dial."));
-
-        TextView modeLabel = ui.text("How it runs", 14, ui.onSurface);
-        modeLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        modeLabel.setPadding(ui.dp(4), ui.dp(18), 0, ui.dp(8));
-        form.addView(modeLabel);
-        final String[] mode = {a.mode};
-        LinearLayout chipHolder = ui.col();
-        TextView modeHelp = ui.small(Store.modeHelp(a.mode));
-        modeHelp.setPadding(ui.dp(4), ui.dp(8), 0, 0);
-        Runnable[] renderChips = new Runnable[1];
-        renderChips[0] = () -> {
-            chipHolder.removeAllViews();
-            View[] chips = new View[Store.MODES.length];
-            for (int i = 0; i < Store.MODES.length; i++) {
-                String m = Store.MODES[i];
-                chips[i] = ui.chip(Store.modeName(m), m.equals(mode[0]), v -> {
-                    mode[0] = m;
-                    modeHelp.setText(Store.modeHelp(m));
-                    renderChips[0].run();
-                });
-            }
-            chipHolder.addView(ui.chipRow(chips));
-        };
-        renderChips[0].run();
-        form.addView(chipHolder);
-        form.addView(modeHelp);
-
-        EditText steps = ui.field("e.g. @airtime, @myself, {AMOUNT}, {PIN}", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        steps.setTypeface(Typeface.MONOSPACE);
-        steps.setMinLines(2);
-        steps.setText(a.steps);
-        form.addView(ui.labelled("Steps (optional)", steps, "The answers to give, in order, separated by commas. Used by Custom screen and Auto-pilot. Leave empty to answer everything yourself."));
-
-        LinearLayout syntax = ui.card(ui.surfaceLow);
-        syntax.addView(ui.titleSmall("How to write steps"));
-        String[][] rows = {
-                {"1", "Types 1, exactly like you would."},
-                {"@airtime", "Finds the option whose words contain \"airtime\" and picks its number. Keeps working if the menu order changes."},
-                {"{PHONE}", "A phone number you're asked for before each run."},
-                {"{AMOUNT}", "An amount you're asked for before each run."},
-                {"{PIN}", "Your PIN: typed on the secure PIN screen, or filled from your saved PIN."},
-        };
-        for (String[] r : rows) {
-            LinearLayout line = ui.row();
-            line.setGravity(Gravity.TOP);
-            line.setPadding(0, ui.dp(10), 0, 0);
-            TextView k = ui.text(r[0], 13, ui.onSecondaryContainer);
-            k.setTypeface(Typeface.MONOSPACE);
-            k.setPadding(ui.dp(8), ui.dp(2), ui.dp(8), ui.dp(2));
-            k.setBackground(ui.shape(ui.secondaryContainer, 6));
-            line.addView(k);
-            TextView d = ui.small(r[1]);
-            d.setPadding(ui.dp(10), 0, 0, 0);
-            line.addView(d, Ui.weight());
-            syntax.addView(line);
-        }
-        TextView tip = ui.small("Not sure of the steps? Run the code on the Custom screen with no steps, tap through it once, then tap \"Save these steps\" at the end.");
-        tip.setPadding(0, ui.dp(12), 0, 0);
-        syntax.addView(tip);
-        form.addView(syntax, ui.full(12));
-
-        LinearLayout pinRow = ui.row();
-        pinRow.setPadding(ui.dp(4), ui.dp(16), 0, 0);
-        LinearLayout pt = ui.col();
-        pt.addView(ui.titleSmall("Fill in my PIN"));
-        TextView pd = ui.small("Uses your saved PIN after a fingerprint check, so the run can finish by itself. Off: you type the PIN on the secure PIN screen.");
-        pd.setPadding(0, ui.dp(4), ui.dp(12), 0);
-        pt.addView(pd);
-        pinRow.addView(pt, Ui.weight());
-        Switch autoPin = new Switch(this);
-        autoPin.setChecked(a.autoPin);
-        pinRow.addView(autoPin);
-        form.addView(pinRow, ui.full());
-
-        Runnable collect = () -> {
-            a.name = name.getText().toString().trim();
-            a.code = code.getText().toString().trim();
-            a.steps = steps.getText().toString().trim();
-            a.mode = mode[0];
-            a.autoPin = autoPin.isChecked();
-        };
-        LinearLayout buttons = ui.row();
-        buttons.setPadding(0, ui.dp(24), 0, 0);
-        buttons.addView(ui.filled("Save", v -> {
-            collect.run();
-            if (a.code.isEmpty()) {
-                toast("Add a code first");
-                return;
-            }
-            if (a.autoPin && !PinVault.has(this)) toast("Saved. Save your PIN in Setup to use \"Fill in my PIN\".");
-            store.upsert(a);
-            closeEditor();
-        }), Ui.weight());
-        buttons.addView(ui.tonal("Run now", v -> {
-            collect.run();
-            run(a);
-        }), ui.wrap(8));
-        form.addView(buttons, ui.full());
-        LinearLayout more = ui.row();
-        more.setPadding(0, ui.dp(8), 0, 0);
-        more.addView(ui.textButton("Add to home screen", v -> {
-            collect.run();
-            store.upsert(a);
-            pinShortcut(a);
-        }));
-        if (!isNew) {
-            TextView del = ui.textButton("Delete", v -> {
-                store.delete(a.id);
-                closeEditor();
-            });
-            del.setTextColor(ui.error);
-            more.addView(del);
-        }
-        form.addView(more);
-        setPage(page);
+        page.setPadding(ui.dp(8), ui.dp(8), ui.dp(16), ui.dp(32));
+        EditorPage.build(this, page, a, isNew);
+        setPage(page, 0);
     }
 
-    private void closeEditor() {
-        hideKeyboard();
-        showTab(0);
+    void closeEditor() {
+        View f = getCurrentFocus();
+        if (f != null) {
+            android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) imm.hideSoftInputFromWindow(f.getWindowToken(), 0);
+        }
+        editorOpen = false;
+        showTab(tab);
+    }
+
+    // ------------------------------------------------------------ action sheet
+
+    void actionSheet(Store.Action a) {
+        LinearLayout box = ui.col();
+        LinearLayout head = ui.row();
+        head.addView(ui.iconTile(Ui.modeIcon(a.mode), ui.primaryContainer, ui.onPrimaryContainer, 44));
+        LinearLayout ht = ui.col();
+        ht.setPadding(ui.dp(14), 0, 0, 0);
+        ht.addView(ui.title(a.title()));
+        int n = StepEngine.parse(a.steps).size();
+        ht.addView(ui.small(a.code + "  ·  " + Store.modeName(a.mode) + (n > 0 ? "  ·  " + n + " steps" : "")));
+        head.addView(ht, Ui.weight());
+        box.addView(head, ui.full());
+        Dialog[] d = new Dialog[1];
+        LinearLayout g = ui.group(
+                ui.listRow(R.drawable.ic_play, "Run", null, null, v -> { d[0].dismiss(); run(a); }),
+                ui.listRow(R.drawable.ic_edit, "Edit", "Name, code, steps and options", null, v -> { d[0].dismiss(); openEditor(a, false); }),
+                ui.listRow(R.drawable.ic_widgets, a.onWidget ? "Remove from widget" : "Show on widget", "Up to four commands appear on the home-screen widget", null, v -> {
+                    d[0].dismiss();
+                    a.onWidget = !a.onWidget;
+                    store.upsert(a);
+                    Widget.refresh(this);
+                    toast(a.onWidget ? "Added to the widget" : "Removed from the widget");
+                    showTab(tab);
+                }),
+                ui.listRow(R.drawable.ic_star, "Add to home screen", "A one-tap shortcut icon", null, v -> { d[0].dismiss(); pinShortcut(a); }),
+                ui.listRow(R.drawable.ic_share, "Share", "Send this command to another phone", null, v -> {
+                    d[0].dismiss();
+                    List<Store.Action> one = new ArrayList<>();
+                    one.add(a);
+                    share(a.title(), Store.export(one));
+                }),
+                ui.listRow(R.drawable.ic_delete, "Delete", null, null, v -> {
+                    d[0].dismiss();
+                    store.delete(a.id);
+                    Widget.refresh(this);
+                    showTab(tab);
+                }));
+        box.addView(g, ui.full(16));
+        d[0] = Sheet.show(this, ui, box);
+    }
+
+    void simSheet() {
+        List<Sims.Sim> sims = Sims.list(this);
+        LinearLayout box = ui.col();
+        box.addView(ui.title("Send codes from"));
+        TextView s = ui.small("Silent requests and dialled codes use this SIM.");
+        s.setPadding(0, ui.dp(4), 0, ui.dp(14));
+        box.addView(s);
+        if (sims.isEmpty()) {
+            box.addView(ui.body(phoneOk() ? "No SIM found. The phone's default SIM will be used." : "Allow phone access in Settings to choose a SIM."));
+            Sheet.show(this, ui, box);
+            return;
+        }
+        Dialog[] d = new Dialog[1];
+        Sims.Sim cur = Sims.selected(this);
+        View[] rows = new View[sims.size()];
+        for (int i = 0; i < sims.size(); i++) {
+            Sims.Sim sim = sims.get(i);
+            boolean sel = cur != null && cur.slot == sim.slot;
+            rows[i] = ui.listRow(R.drawable.ic_sim, sim.label, null, sel ? ui.icon(R.drawable.ic_check, ui.primary, 22) : null, v -> {
+                store.setSimSlot(sim.slot);
+                d[0].dismiss();
+                showTab(tab);
+            });
+        }
+        box.addView(ui.group(rows), ui.full());
+        d[0] = Sheet.show(this, ui, box);
+    }
+
+    String simLabel() {
+        Sims.Sim s = Sims.selected(this);
+        return s == null ? "Default SIM" : s.label;
     }
 
     // --------------------------------------------------------------------- run
 
-    private void run(Store.Action a) {
+    void run(Store.Action a) { run(a, null); }
+
+    /** @param recordName non-null for "Record a command": always uses the custom sheet. */
+    void run(Store.Action a, String recordName) {
         if (a.code == null || a.code.trim().isEmpty()) {
             toast("Enter a USSD code first");
             return;
         }
-        if (Store.DIALPAD.equals(a.mode)) {
+        if (Store.DIALPAD.equals(a.mode) && recordName == null) {
             Sims.dialPad(this, a.code);
-            store.addRun(a.title(), Store.DIALPAD, true, "Opened the dial pad with " + a.code + ".", "");
+            store.addRun(a.title(), Store.DIALPAD, true, "Opened the dial pad with " + a.code + ".", "", a.id);
             return;
         }
         if (!granted(Manifest.permission.CALL_PHONE)) {
-            askPerms(() -> run(a));
+            askPerms(() -> run(a, recordName));
             return;
         }
-        List<String> steps = StepEngine.parse(a.steps);
+        List<String> steps = StepEngine.parse(recordName != null ? "" : a.steps);
         List<String> needed = new ArrayList<>();
         if (StepEngine.uses(steps, "{PHONE}")) needed.add("PHONE");
         if (StepEngine.uses(steps, "{AMOUNT}")) needed.add("AMOUNT");
-        if (needed.isEmpty()) runWith(a, steps, new HashMap<>());
-        else askValues(a, needed, vars -> runWith(a, steps, vars));
+        if (needed.isEmpty()) runWith(a, steps, new HashMap<>(), recordName);
+        else askValues(a, needed, vars -> runWith(a, steps, vars, recordName));
     }
 
-    private void runWith(Store.Action a, List<String> steps, Map<String, String> vars) {
+    private void runWith(Store.Action a, List<String> steps, Map<String, String> vars, String recordName) {
+        if (recordName != null) {
+            if (!serviceOn()) {
+                automationSheet();
+                return;
+            }
+            start(a, steps, vars, null, Job.Mode.CUSTOM, recordName);
+            return;
+        }
         switch (a.mode) {
             case Store.SILENT:
                 quick(a, steps, vars);
                 return;
             case Store.PHONE:
-                if (serviceOn()) start(a, steps, vars, null, Job.Mode.WATCH);
+                if (serviceOn()) start(a, steps, vars, null, Job.Mode.WATCH, null);
                 else {
                     dialSafely(a.code);
-                    store.addRun(a.title(), Store.PHONE, true, "Dialled " + a.code + " in the phone's pop-up. Turn on Automation to record the screens.", "");
+                    store.addRun(a.title(), Store.PHONE, true, "Dialled " + a.code + " in the phone's pop-up. Turn on Automation to record the screens.", "", a.id);
                 }
                 return;
             default:
                 if (!serviceOn()) {
-                    explainAutomation();
+                    automationSheet();
                     return;
                 }
                 Job.Mode m = Store.AUTOPILOT.equals(a.mode) || !store.cover() ? Job.Mode.AUTOPILOT : Job.Mode.CUSTOM;
                 boolean wantsPin = StepEngine.uses(steps, StepEngine.PIN) && a.autoPin && PinVault.has(this);
                 if (!wantsPin) {
-                    start(a, steps, vars, null, m);
+                    start(a, steps, vars, null, m, null);
                     return;
                 }
                 authenticate("Unlock your saved PIN", () -> {
                     try {
-                        start(a, steps, vars, PinVault.load(this), m);
+                        start(a, steps, vars, PinVault.load(this), m, null);
                     } catch (Exception e) {
                         showError(e);
                     }
@@ -800,37 +399,40 @@ public class MainActivity extends Activity {
 
     private void quick(Store.Action a, List<String> steps, Map<String, String> vars) {
         toast("Asking the network…");
-        Sims.quick(this, a.code, selectedSim(), (ok, reply) -> {
+        Sims.quick(this, a.code, Sims.selected(this), (ok, reply) -> {
             if (ok) {
-                store.addRun(a.title(), Store.SILENT, true, reply, "◀ " + reply.replace("\n", " ⏎ "));
-                if (!editorOpen) showTab(tab == 2 ? 2 : 0);
-                showReplyDialog(a.title(), reply);
+                store.addRun(a.title(), Store.SILENT, true, reply, "◀ " + reply.replace("\n", " ⏎ "), a.id);
+                Widget.refresh(this);
+                if (!editorOpen) showTab(tab);
+                Store.Run r = store.lastRun();
+                if (r != null) HistoryPage.showDetail(this, r);
             } else if (serviceOn()) {
                 boolean cover = store.cover();
-                toast(cover ? "Silent mode can't open this code. Opening it on the custom screen." : "Silent mode can't open this code. Opening the phone's pop-up.");
-                start(a, steps, vars, null, cover ? Job.Mode.CUSTOM : Job.Mode.AUTOPILOT);
+                toast(cover ? "This code opens a menu. Showing it on USSD Lab's screen." : "This code opens a menu. Showing the phone's pop-up.");
+                start(a, steps, vars, null, cover ? Job.Mode.CUSTOM : Job.Mode.AUTOPILOT, null);
             } else {
-                store.addRun(a.title(), Store.SILENT, false, reply, "✗ " + reply);
+                store.addRun(a.title(), Store.SILENT, false, reply + " Turn on Automation so menus open on their own.", "✗ " + reply, a.id);
+                Widget.refresh(this);
                 if (!editorOpen) showTab(tab);
-                new AlertDialog.Builder(this).setTitle("Silent mode didn't work")
-                        .setMessage(reply + "\n\nCodes that open a menu need the custom screen or the phone's pop-up. Turn on Automation in Setup and USSD Lab will switch automatically next time.")
-                        .setPositiveButton("Open in pop-up", (d, w) -> dialSafely(a.code))
-                        .setNegativeButton("Close", null).show();
+                Store.Run r = store.lastRun();
+                if (r != null) HistoryPage.showDetail(this, r);
             }
         });
     }
 
-    private void start(Store.Action a, List<String> steps, Map<String, String> vars, char[] pin, Job.Mode mode) {
+    private void start(Store.Action a, List<String> steps, Map<String, String> vars, char[] pin, Job.Mode mode, String recordName) {
         UssdService svc = UssdService.instance;
         if (svc == null) {
             if (pin != null) Arrays.fill(pin, '\0');
-            explainAutomation();
+            automationSheet();
             return;
         }
-        Job job = new Job(a.title(), a.code, steps, vars, pin, mode);
-        svc.begin(job, j -> runOnUiThread(() -> { if (!editorOpen) showTab(tab); }));
+        Job job = new Job(recordName != null ? recordName : a.title(), a.code, steps, vars, pin, mode);
+        job.actionId = a.id;
+        job.recordName = recordName;
+        svc.begin(job, j -> runOnUiThread(() -> { if (!editorOpen) showTab(tab); }), simLabel());
         try {
-            Sims.dial(this, a.code, selectedSim());
+            Sims.dial(this, a.code, Sims.selected(this));
         } catch (RuntimeException e) {
             svc.onCancel();
             showError(e);
@@ -839,57 +441,51 @@ public class MainActivity extends Activity {
 
     private void dialSafely(String code) {
         try {
-            Sims.dial(this, code, selectedSim());
+            Sims.dial(this, code, Sims.selected(this));
         } catch (RuntimeException e) {
             showError(e);
         }
-    }
-
-    private void showReplyDialog(String title, String reply) {
-        List<String> amounts = Reply.amounts(reply);
-        String extra = amounts.isEmpty() ? "" : "\n\nFound: " + TextUtils.join(", ", amounts);
-        new AlertDialog.Builder(this).setTitle(title).setMessage(reply + extra)
-                .setPositiveButton("OK", null)
-                .setNeutralButton("Copy", (d, w) -> copy(reply, "Reply copied")).show();
     }
 
     interface VarsCallback { void onVars(Map<String, String> vars); }
 
     private void askValues(Store.Action a, List<String> keys, VarsCallback cb) {
         LinearLayout box = ui.col();
-        box.setPadding(ui.dp(24), ui.dp(4), ui.dp(24), 0);
+        box.addView(ui.title(a.title()));
+        TextView s = ui.small("Fill these in for this run. They're remembered for next time.");
+        s.setPadding(0, ui.dp(4), 0, ui.dp(4));
+        box.addView(s);
         Map<String, EditText> fields = new HashMap<>();
         for (String k : keys) {
             boolean phone = k.equals("PHONE");
             EditText e = ui.field(phone ? "e.g. 677123456" : "e.g. 500", phone ? InputType.TYPE_CLASS_PHONE : InputType.TYPE_CLASS_NUMBER);
             e.setText(store.var(k));
             fields.put(k, e);
-            box.addView(ui.labelled(phone ? "Phone number" : "Amount", e, phone ? "Who it's for. Used wherever the steps say {PHONE}." : "Used wherever the steps say {AMOUNT}."));
+            box.addView(ui.labelled(phone ? "Phone number" : "Amount", e, null));
         }
-        new AlertDialog.Builder(this)
-                .setTitle(a.title())
-                .setView(box)
-                .setPositiveButton("Continue", (d, w) -> {
-                    Map<String, String> vars = new HashMap<>();
-                    for (String k : keys) {
-                        String v = fields.get(k).getText().toString().trim();
-                        if (k.equals("PHONE")) v = v.replaceAll("[^0-9+]", "");
-                        if (v.isEmpty()) {
-                            toast("Fill in every value");
-                            return;
-                        }
-                        store.setVar(k, v);
-                        vars.put(k, v);
-                    }
-                    cb.onVars(vars);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        Dialog[] d = new Dialog[1];
+        TextView go = ui.iconText(ui.filled("Continue", v -> {
+            Map<String, String> vars = new HashMap<>();
+            for (String k : keys) {
+                String val = fields.get(k).getText().toString().trim();
+                if (k.equals("PHONE")) val = val.replaceAll("[^0-9+]", "");
+                if (val.isEmpty()) {
+                    toast("Fill in every value");
+                    return;
+                }
+                store.setVar(k, val);
+                vars.put(k, val);
+            }
+            d[0].dismiss();
+            cb.onVars(vars);
+        }), R.drawable.ic_play);
+        box.addView(go, ui.full(20));
+        d[0] = Sheet.show(this, ui, box);
     }
 
     // -------------------------------------------------------------- shortcuts
 
-    private void pinShortcut(Store.Action a) {
+    void pinShortcut(Store.Action a) {
         ShortcutManager sm = getSystemService(ShortcutManager.class);
         if (sm == null || !sm.isRequestPinShortcutSupported()) {
             toast("Your home screen doesn't support shortcuts");
@@ -907,67 +503,72 @@ public class MainActivity extends Activity {
         sm.requestPinShortcut(info, null);
     }
 
-    // -------------------------------------------------------------------- SIMs
-
-    private int selectedSlot() {
-        int saved = store.simSlot();
-        for (Sims.Sim s : sims) if (s.slot == saved) return saved;
-        return sims.isEmpty() ? -1 : sims.get(0).slot;
-    }
-
-    private Sims.Sim selectedSim() {
-        if (sims.isEmpty()) sims = Sims.list(this);
-        int slot = selectedSlot();
-        for (Sims.Sim s : sims) if (s.slot == slot) return s;
-        return null;
-    }
-
     // --------------------------------------------------------------------- PIN
 
-    interface PinCallback { void onPin(char[] pin); }
-
-    private void askPin(String title, String msg, PinCallback cb) {
-        EditText in = ui.field("PIN", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+    void pinSheet() {
+        boolean has = PinVault.has(this);
         LinearLayout box = ui.col();
-        box.setPadding(ui.dp(24), ui.dp(8), ui.dp(24), 0);
-        box.addView(in, ui.full());
-        new AlertDialog.Builder(this)
-                .setTitle(title)
-                .setMessage(msg)
-                .setView(box)
-                .setPositiveButton("Save", (d, w) -> {
-                    int n = in.getText().length();
-                    if (n == 0) return;
-                    char[] pin = new char[n];
-                    in.getText().getChars(0, n, pin, 0);
-                    in.getText().clear();
-                    cb.onPin(pin);
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        LinearLayout head = ui.row();
+        head.addView(ui.iconTile(R.drawable.ic_lock, ui.primaryContainer, ui.onPrimaryContainer, 44));
+        LinearLayout ht = ui.col();
+        ht.setPadding(ui.dp(14), 0, 0, 0);
+        ht.addView(ui.title("Saved PIN"));
+        ht.addView(ui.small(has ? "Saved and encrypted on this phone" : "Not saved"));
+        head.addView(ht, Ui.weight());
+        box.addView(head);
+        TextView b = ui.body("You don't need to save your PIN: when a menu asks for it, you type it on USSD Lab's secure PIN screen and it's never kept.\n\nSave it only if you want commands with \"Fill in my PIN\" to finish by themselves. It's encrypted with a key in the phone's secure hardware and unlocks only for 30 seconds after your fingerprint or screen lock.\n\nCheck that your mobile money provider allows this.");
+        b.setPadding(0, ui.dp(14), 0, ui.dp(18));
+        box.addView(b);
+        Dialog[] d = new Dialog[1];
+        LinearLayout r = ui.row();
+        r.addView(ui.filled(has ? "Change PIN" : "Save PIN", v -> { d[0].dismiss(); savePinFlow(); }), Ui.weight());
+        if (has) {
+            TextView rm = ui.tonal("Remove", v -> {
+                d[0].dismiss();
+                PinVault.clear(this);
+                toast("PIN removed");
+                showTab(tab);
+            });
+            LinearLayout.LayoutParams lp = Ui.weight();
+            lp.setMarginStart(ui.dp(10));
+            r.addView(rm, lp);
+        }
+        box.addView(r, ui.full());
+        d[0] = Sheet.show(this, ui, box);
     }
 
     private void savePinFlow() {
         try {
             PinVault.ensureKey();
         } catch (Exception e) {
-            new AlertDialog.Builder(this).setTitle("Add a screen lock first")
-                    .setMessage("Your saved PIN is protected by the phone's screen lock and fingerprint. Add a screen lock in your phone's Settings, then try again.")
-                    .setPositiveButton("OK", null).show();
+            infoSheet(R.drawable.ic_lock, "Add a screen lock first", "Your saved PIN is protected by the phone's screen lock and fingerprint. Add a screen lock in your phone's Settings, then try again.");
             return;
         }
-        askPin("Save your PIN", "It's encrypted on this phone and only unlocks with your fingerprint or screen lock.", pin ->
-                authenticate("Confirm to save your PIN", () -> {
-                    try {
-                        PinVault.save(this, pin);
-                        toast("PIN saved");
-                    } catch (Exception e) {
-                        showError(e);
-                    } finally {
-                        Arrays.fill(pin, '\0');
-                        if (!editorOpen) showTab(tab);
-                    }
-                }));
+        LinearLayout box = ui.col();
+        box.addView(ui.title("Save your PIN"));
+        EditText in = ui.field("PIN", InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        box.addView(ui.labelled("PIN", in, "Next, confirm with your fingerprint or screen lock."));
+        Dialog[] d = new Dialog[1];
+        box.addView(ui.iconText(ui.filled("Save", v -> {
+            int n = in.getText().length();
+            if (n == 0) return;
+            char[] pin = new char[n];
+            in.getText().getChars(0, n, pin, 0);
+            in.getText().clear();
+            d[0].dismiss();
+            authenticate("Confirm to save your PIN", () -> {
+                try {
+                    PinVault.save(this, pin);
+                    toast("PIN saved");
+                } catch (Exception e) {
+                    showError(e);
+                } finally {
+                    Arrays.fill(pin, '\0');
+                    if (!editorOpen) showTab(tab);
+                }
+            });
+        }), R.drawable.ic_lock), ui.full(20));
+        d[0] = Sheet.show(this, ui, box);
     }
 
     private void authenticate(String title, Runnable ok) {
@@ -1028,13 +629,13 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------ permissions
 
-    private boolean granted(String p) { return checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED; }
+    boolean granted(String p) { return checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED; }
 
-    private boolean phoneOk() { return granted(Manifest.permission.CALL_PHONE) && granted(Manifest.permission.READ_PHONE_STATE); }
+    boolean phoneOk() { return granted(Manifest.permission.CALL_PHONE) && granted(Manifest.permission.READ_PHONE_STATE); }
 
-    private boolean serviceOn() { return UssdService.instance != null; }
+    boolean serviceOn() { return UssdService.instance != null; }
 
-    private void askPerms(Runnable then) {
+    void askPerms(Runnable then) {
         afterPerms = then;
         requestPermissions(new String[]{Manifest.permission.CALL_PHONE, Manifest.permission.READ_PHONE_STATE}, REQ_PERMS);
     }
@@ -1044,6 +645,7 @@ public class MainActivity extends Activity {
         Runnable r = afterPerms;
         afterPerms = null;
         if (granted(Manifest.permission.CALL_PHONE)) {
+            Widget.refresh(this);
             if (r != null) r.run();
             else if (!editorOpen) showTab(tab);
         } else {
@@ -1052,32 +654,71 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void explainAutomation() {
-        new AlertDialog.Builder(this)
-                .setTitle("Turn on Automation")
-                .setMessage("Menus, Auto-pilot and the Custom screen need Automation. It lets USSD Lab read the USSD pop-up and type your answers, and only while a run you started is going.")
-                .setPositiveButton("Show me how", (d, w) -> showTab(3))
-                .setNegativeButton("Not now", null)
-                .show();
+    void automationSheet() {
+        LinearLayout box = ui.col();
+        LinearLayout head = ui.row();
+        head.addView(ui.iconTile(R.drawable.ic_accessibility, ui.primaryContainer, ui.onPrimaryContainer, 44));
+        LinearLayout ht = ui.col();
+        ht.setPadding(ui.dp(14), 0, 0, 0);
+        ht.addView(ui.title("Turn on Automation"));
+        ht.addView(ui.small(serviceOn() ? "It's on" : "Needed for menus, recording and the widget"));
+        head.addView(ht, Ui.weight());
+        box.addView(head);
+        String how = "Automation lets USSD Lab read the USSD pop-up and type your answers. It only acts while a run you started is going; with Listen mode on it only copies text.\n\n"
+                + "1.  Tap Open settings\n2.  Choose Installed apps (or Downloaded apps)\n3.  Tap USSD Lab and turn it on";
+        if (Build.VERSION.SDK_INT >= 33) how += "\n\nSwitch greyed out? Tap App info → ⋮ (top right) → Allow restricted settings, then try again. Android does this for apps installed from a file.";
+        TextView b = ui.body(how);
+        b.setPadding(0, ui.dp(14), 0, ui.dp(18));
+        box.addView(b);
+        Dialog[] d = new Dialog[1];
+        LinearLayout r = ui.row();
+        r.addView(ui.filled("Open settings", v -> {
+            d[0].dismiss();
+            startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS));
+        }), Ui.weight());
+        TextView info = ui.tonal("App info", v -> {
+            d[0].dismiss();
+            startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    android.net.Uri.fromParts("package", getPackageName(), null)));
+        });
+        LinearLayout.LayoutParams lp = Ui.weight();
+        lp.setMarginStart(ui.dp(10));
+        r.addView(info, lp);
+        box.addView(r, ui.full());
+        d[0] = Sheet.show(this, ui, box);
+    }
+
+    void infoSheet(int icon, String title, String body) {
+        LinearLayout box = ui.col();
+        LinearLayout head = ui.row();
+        head.addView(ui.iconTile(icon, ui.secondaryContainer, ui.onSecondaryContainer, 44));
+        TextView t = ui.title(title);
+        t.setPadding(ui.dp(14), 0, 0, 0);
+        head.addView(t, Ui.weight());
+        box.addView(head);
+        TextView b = ui.body(body);
+        b.setPadding(0, ui.dp(14), 0, ui.dp(18));
+        box.addView(b);
+        Dialog[] d = new Dialog[1];
+        box.addView(ui.filled("OK", v -> d[0].dismiss()), ui.full());
+        d[0] = Sheet.show(this, ui, box);
     }
 
     // ---------------------------------------------------------------- helpers
 
-    private void copy(String text, String msg) {
+    void copy(String text, String msg) {
         ((ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("USSD Lab", text));
         toast(msg);
     }
 
-    private void hideKeyboard() {
-        View f = getCurrentFocus();
-        if (f == null) return;
-        android.view.inputmethod.InputMethodManager imm = (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
-        if (imm != null) imm.hideSoftInputFromWindow(f.getWindowToken(), 0);
+    void share(String subject, String text) {
+        Intent i = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_SUBJECT, subject).putExtra(Intent.EXTRA_TEXT, text);
+        startActivity(Intent.createChooser(i, "Share"));
     }
 
-    private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
+    void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
 
-    private void showError(Exception e) {
+    void showError(Exception e) {
         String m = e.getMessage();
         if (e.getClass().getSimpleName().equals("UserNotAuthenticatedException")) m = "The fingerprint check expired. Try again.";
         toast(TextUtils.isEmpty(m) ? e.getClass().getSimpleName() : m);

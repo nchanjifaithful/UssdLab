@@ -135,6 +135,17 @@ public final class StepEngine {
         return null;
     }
 
+    /** A step in plain words, for the progress timeline. */
+    public static String describe(String step) {
+        String s = step.trim();
+        String u = s.toUpperCase(Locale.ROOT);
+        if (s.startsWith("@")) return "Choose \u201C" + s.substring(1).trim() + "\u201D";
+        if (u.equals(PIN)) return "Enter your PIN";
+        if (u.equals("{PHONE}")) return "Enter the phone number";
+        if (u.equals("{AMOUNT}")) return "Enter the amount";
+        return "Reply " + s.replace(PIN, "••••");
+    }
+
     // ------------------------------------------------------------ screen parsing
 
     public static final class Option {

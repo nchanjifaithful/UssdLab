@@ -31,6 +31,10 @@ public final class Job {
     /** The path actually taken, as reusable steps (for "Save as action"). */
     public final List<String> route = new ArrayList<>();
     public int userAnswers;
+    /** The saved action this run came from, if any. */
+    public String actionId;
+    /** Set when this run is "Record a command": the name to save it under. */
+    public String recordName;
     private final StringBuilder log = new StringBuilder();
     private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm:ss", Locale.ROOT);
 

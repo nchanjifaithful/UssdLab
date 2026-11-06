@@ -47,10 +47,14 @@ final class Store {
         String steps = "";
         String mode = CUSTOM;
         boolean autoPin;
+        /** Shown as a button on the home-screen widget. */
+        boolean onWidget;
+        /** Made with "Record a command". */
+        boolean recorded;
 
         JSONObject json() throws Exception {
             return new JSONObject().put("id", id).put("name", name).put("code", code).put("steps", steps)
-                    .put("mode", mode).put("autoPin", autoPin);
+                    .put("mode", mode).put("autoPin", autoPin).put("widget", onWidget).put("recorded", recorded);
         }
 
         static Action of(JSONObject o) {
@@ -61,6 +65,8 @@ final class Store {
             a.steps = o.optString("steps");
             a.mode = o.optString("mode", CUSTOM);
             a.autoPin = o.optBoolean("autoPin");
+            a.onWidget = o.optBoolean("widget");
+            a.recorded = o.optBoolean("recorded");
             return a;
         }
 
@@ -77,13 +83,13 @@ final class Store {
     }
 
     static final class Run {
-        String title, mode, result, log;
+        String title, mode, result, log, actionId;
         long time;
         boolean ok;
 
         JSONObject json() throws Exception {
             return new JSONObject().put("title", title).put("mode", mode).put("result", result)
-                    .put("log", log).put("time", time).put("ok", ok);
+                    .put("log", log).put("time", time).put("ok", ok).put("action", actionId == null ? "" : actionId);
         }
 
         static Run of(JSONObject o) {
@@ -94,6 +100,7 @@ final class Store {
             r.log = o.optString("log");
             r.time = o.optLong("time");
             r.ok = o.optBoolean("ok");
+            r.actionId = o.optString("action", "");
             return r;
         }
     }
@@ -158,8 +165,12 @@ final class Store {
 
     private static List<Action> defaults() {
         List<Action> l = new ArrayList<>();
-        l.add(Action.make("Airtime balance", "*155#", "", SILENT));
-        l.add(Action.make("MoMo on the custom screen", "*126#", "", CUSTOM));
+        Action bal = Action.make("Airtime balance", "*155#", "", SILENT);
+        bal.onWidget = true;
+        l.add(bal);
+        Action momo = Action.make("MoMo menu", "*126#", "", CUSTOM);
+        momo.onWidget = true;
+        l.add(momo);
         l.add(Action.make("Buy airtime (example)", "*126#", "@airtime, @myself, {AMOUNT}, {PIN}", CUSTOM));
         l.add(Action.make("Send money (example)", "*126#", "@transfer, @momo, {PHONE}, {PHONE}, {AMOUNT}, {PIN}", CUSTOM));
         l.add(Action.make("MoMo in the phone's pop-up", "*126#", "", PHONE));
@@ -199,7 +210,12 @@ final class Store {
     }
 
     synchronized void addRun(String title, String mode, boolean ok, String result, String log) {
+        addRun(title, mode, ok, result, log, null);
+    }
+
+    synchronized void addRun(String title, String mode, boolean ok, String result, String log, String actionId) {
         Run r = new Run();
+        r.actionId = actionId;
         r.title = title;
         r.mode = mode;
         r.ok = ok;
@@ -218,4 +234,60 @@ final class Store {
     }
 
     void clearRuns() { p.edit().remove("runs").apply(); }
+
+    Run lastRun() {
+        List<Run> r = runs();
+        return r.isEmpty() ? null : r.get(0);
+    }
+
+    /** Up to four actions for the widget: the ones marked for it, else the first four. */
+    List<Action> widgetActions() {
+        List<Action> all = actions();
+        List<Action> out = new ArrayList<>();
+        for (Action a : all) if (a.onWidget && out.size() < 4) out.add(a);
+        if (out.isEmpty()) for (int i = 0; i < all.size() && i < 4; i++) out.add(all.get(i));
+        return out;
+    }
+
+    String widgetStatus() { return p.getString("w_status", ""); }
+    void setWidgetStatus(String s) { p.edit().putString("w_status", s).apply(); }
+
+    // ---- sharing commands between phones
+
+    static String export(List<Action> list) {
+        JSONArray a = new JSONArray();
+        try {
+            for (Action x : list) {
+                JSONObject o = x.json();
+                o.remove("id");
+                a.put(o);
+            }
+        } catch (Exception ignored) {
+        }
+        return "USSDLAB:" + a.toString();
+    }
+
+    /** Returns how many commands were imported, or -1 if the text isn't a USSD Lab export. */
+    int importText(String text) {
+        if (text == null) return -1;
+        int i = text.indexOf("USSDLAB:");
+        if (i < 0) return -1;
+        try {
+            JSONArray a = new JSONArray(text.substring(i + 8).trim());
+            List<Action> l = actions();
+            int n = 0;
+            for (int k = 0; k < a.length(); k++) {
+                JSONObject o = a.getJSONObject(k);
+                o.remove("id");
+                Action x = Action.of(o);
+                if (x.code.isEmpty()) continue;
+                l.add(x);
+                n++;
+            }
+            saveActions(l);
+            return n;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
 }

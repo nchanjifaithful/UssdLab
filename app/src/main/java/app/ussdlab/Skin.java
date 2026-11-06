@@ -1,6 +1,9 @@
 package app.ussdlab;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.res.ColorStateList;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
 import android.text.TextUtils;
@@ -9,17 +12,20 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.Arrays;
 import java.util.List;
 
 /**
- * The custom USSD interface. It is drawn as an accessibility overlay on top of the phone's USSD
- * pop-up, so the pop-up is still there (and still receives the answers) but you only see this screen.
+ * The custom USSD interface: a rounded bottom sheet drawn as an accessibility overlay on top of the
+ * phone's USSD pop-up. The pop-up is still there underneath (and receives the answers); a dark
+ * backdrop hides it, so you only see this sheet.
  */
 final class Skin {
 
@@ -29,24 +35,29 @@ final class Skin {
         void onCancel();
         void onShowPhone();
         void onDone();
-        void onSaveRoute();
+        /** Save the path just taken as a command. Returns the saved name, or null. */
+        String onSaveRoute();
     }
+
+    interface ValueCallback { void onValue(String value); }
 
     private final Context c;
     private final Ui ui;
     private final WindowManager wm;
     private final Callbacks cb;
+    private final Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
 
     private FrameLayout cover;
     private WindowManager.LayoutParams coverLp;
     private View banner;
 
     private String title = "";
-    private String code = "";
+    private String subtitle = "";
     private final char[] buf = new char[40];
     private int len;
     private boolean pinMode;
     private TextView inputView;
+    private LinearLayout dots;
 
     Skin(Context c, Callbacks cb) {
         this.c = c;
@@ -63,9 +74,9 @@ final class Skin {
                 | (secure ? WindowManager.LayoutParams.FLAG_SECURE : 0);
         if (cover == null) {
             cover = new FrameLayout(c);
-            cover.setBackgroundColor(ui.surface);
+            cover.setBackgroundColor(0xF20D0E12);
             coverLp = new WindowManager.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, flags, PixelFormat.OPAQUE);
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY, flags, PixelFormat.TRANSLUCENT);
             coverLp.gravity = Gravity.TOP;
             try {
                 wm.addView(cover, coverLp);
@@ -79,13 +90,6 @@ final class Skin {
             } catch (RuntimeException ignored) {
             }
         }
-    }
-
-    private void setPage(View page, boolean secure) {
-        ensureCover(secure);
-        if (cover == null) return;
-        cover.removeAllViews();
-        cover.addView(page, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
     private void removeCover() {
@@ -107,6 +111,7 @@ final class Skin {
     }
 
     void hide() {
+        valueCb = null;
         wipe();
         removeCover();
         removeBanner();
@@ -114,94 +119,147 @@ final class Skin {
 
     boolean coverShowing() { return cover != null; }
 
-    // ---------------------------------------------------------------- frame
+    // ---------------------------------------------------------------- sheet
 
-    /** Top bar + scrolling body + optional fixed bottom area. */
-    private LinearLayout frame(View body, View bottom, boolean showPhoneLink) {
-        LinearLayout page = ui.col();
-        page.setPadding(ui.dp(8), ui.dp(36), ui.dp(8), ui.dp(16));
+    /** Caps a scroll area so the sheet never grows past the screen. */
+    private static final class MaxScroll extends ScrollView {
+        final int max;
 
-        LinearLayout bar = ui.row();
-        TextView close = ui.text("✕", 22, ui.onSurface);
-        close.setGravity(Gravity.CENTER);
-        close.setBackground(ui.ripple(0x00000000, 24));
-        close.setOnClickListener(v -> cb.onCancel());
-        close.setContentDescription("Cancel");
-        bar.addView(close, new LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)));
+        MaxScroll(Context c, int max) {
+            super(c);
+            this.max = max;
+        }
+
+        @Override protected void onMeasure(int w, int h) {
+            super.onMeasure(w, MeasureSpec.makeMeasureSpec(max, MeasureSpec.AT_MOST));
+        }
+    }
+
+    /** Backdrop branding + a floating rounded sheet at the bottom holding body and footer. */
+    private void sheet(View body, View footer, boolean secure, boolean showPhoneLink) {
+        ensureCover(secure);
+        if (cover == null) return;
+        cover.removeAllViews();
+
+        LinearLayout brand = ui.col();
+        brand.setGravity(Gravity.CENTER_HORIZONTAL);
+        brand.setPadding(ui.dp(24), ui.dp(72), ui.dp(24), 0);
+        ImageView logo = new ImageView(c);
+        logo.setImageResource(R.drawable.ic_launcher);
+        brand.addView(logo, new LinearLayout.LayoutParams(ui.dp(52), ui.dp(52)));
+        TextView name = ui.text("USSD Lab", 18, 0xFFFFFFFF);
+        name.setTypeface(medium);
+        name.setPadding(0, ui.dp(12), 0, ui.dp(4));
+        brand.addView(name);
+        TextView tag = ui.text("Your USSD session is running behind this screen", 13, 0xB3FFFFFF);
+        tag.setGravity(Gravity.CENTER);
+        brand.addView(tag);
+        if (showPhoneLink) {
+            TextView phone = ui.text("Show the phone's pop-up", 13, 0xFFB8C4FF);
+            phone.setPadding(ui.dp(14), ui.dp(10), ui.dp(14), ui.dp(10));
+            phone.setBackground(ui.ripple(0x00000000, 20));
+            phone.setOnClickListener(v -> cb.onShowPhone());
+            brand.addView(phone);
+        }
+        cover.addView(brand, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP));
+
+        LinearLayout s = ui.col();
+        s.setBackground(ui.shape(ui.surfaceLow, 32));
+        s.setElevation(ui.dp(12));
+        s.setPadding(ui.dp(20), ui.dp(10), ui.dp(20), ui.dp(20));
+        View handle = new View(c);
+        handle.setBackground(ui.shape(ui.outlineVariant, 2));
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(ui.dp(36), ui.dp(4));
+        hlp.gravity = Gravity.CENTER_HORIZONTAL;
+        hlp.bottomMargin = ui.dp(12);
+        s.addView(handle, hlp);
+
+        LinearLayout head = ui.row();
         LinearLayout titles = ui.col();
-        titles.setPadding(ui.dp(4), 0, 0, 0);
         TextView t = ui.titleSmall(title);
         t.setSingleLine(true);
         t.setEllipsize(TextUtils.TruncateAt.END);
         titles.addView(t);
-        titles.addView(ui.small(code + "  ·  USSD Lab"));
-        bar.addView(titles, Ui.weight());
-        if (showPhoneLink) {
-            TextView phone = ui.textButton("Phone view", v -> cb.onShowPhone());
-            bar.addView(phone);
-        }
-        page.addView(bar);
+        titles.addView(ui.small(subtitle));
+        head.addView(titles, Ui.weight());
+        head.addView(ui.iconButton(R.drawable.ic_close, ui.onSurfaceVariant, ui.surfaceHigh, "Cancel", v -> cb.onCancel()));
+        s.addView(head, ui.full());
 
-        ScrollView sv = new ScrollView(c);
-        sv.setFillViewport(true);
+        int screenH = c.getResources().getDisplayMetrics().heightPixels;
+        MaxScroll sv = new MaxScroll(c, (int) (screenH * (footer != null ? 0.32f : 0.55f)));
+        sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
         LinearLayout inner = ui.col();
-        inner.setPadding(ui.dp(16), ui.dp(8), ui.dp(16), ui.dp(8));
+        inner.setPadding(0, ui.dp(14), 0, 0);
         inner.addView(body, ui.full());
         sv.addView(inner);
-        page.addView(sv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
-        if (bottom != null) {
-            LinearLayout b = ui.col();
-            b.setPadding(ui.dp(16), ui.dp(8), ui.dp(16), 0);
-            b.addView(bottom, ui.full());
-            page.addView(b);
-        }
-        return page;
+        s.addView(sv, ui.full());
+        if (footer != null) s.addView(footer, ui.full(14));
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM);
+        lp.leftMargin = lp.rightMargin = ui.dp(10);
+        lp.bottomMargin = ui.dp(14);
+        cover.addView(s, lp);
     }
 
     // ---------------------------------------------------------------- pages
 
-    void start(String title, String code) {
+    void start(String title, String code, String sim) {
         this.title = title;
-        this.code = code;
-        progress("Connecting to " + code, "Dialling on your chosen SIM…", -1);
+        this.subtitle = code + (sim == null ? "" : "  ·  " + sim);
+        progress(null, 0, "Connecting", "Dialling " + code + "…");
     }
 
-    /** "Working" page: steps are running behind this screen. fraction < 0 = spinner only. */
-    void progress(String headline, String detail, float fraction) {
+    void setTitle(String title, String code, String sim) {
+        this.title = title;
+        this.subtitle = code + (sim == null ? "" : "  ·  " + sim);
+    }
+
+    /** Working page: a timeline of the steps being typed behind the sheet. */
+    void progress(List<String> steps, int index, String headline, String detail) {
         wipe();
         LinearLayout body = ui.col();
-        body.setGravity(Gravity.CENTER_HORIZONTAL);
-        body.setPadding(0, ui.dp(72), 0, 0);
+        LinearLayout top = ui.row();
         ProgressBar spin = new ProgressBar(c);
-        body.addView(spin, new LinearLayout.LayoutParams(ui.dp(56), ui.dp(56)));
-        TextView h = ui.title(headline);
-        h.setGravity(Gravity.CENTER);
-        h.setPadding(0, ui.dp(24), 0, ui.dp(8));
-        body.addView(h, ui.full());
-        TextView d = ui.body(detail);
-        d.setGravity(Gravity.CENTER);
-        body.addView(d, ui.full());
-        if (fraction >= 0) {
-            ProgressBar bar = new ProgressBar(c, null, android.R.attr.progressBarStyleHorizontal);
-            bar.setMax(100);
-            bar.setProgress((int) (fraction * 100));
-            bar.setProgressTintList(android.content.res.ColorStateList.valueOf(ui.primary));
-            bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(ui.surfaceHigh));
-            LinearLayout.LayoutParams lp = ui.full(28);
-            lp.leftMargin = lp.rightMargin = ui.dp(32);
-            body.addView(bar, lp);
+        spin.setIndeterminateTintList(ColorStateList.valueOf(ui.primary));
+        top.addView(spin, new LinearLayout.LayoutParams(ui.dp(28), ui.dp(28)));
+        LinearLayout tt = ui.col();
+        tt.setPadding(ui.dp(14), 0, 0, 0);
+        tt.addView(ui.title(headline));
+        if (detail != null) tt.addView(ui.small(detail));
+        top.addView(tt, Ui.weight());
+        body.addView(top, ui.full());
+        if (steps != null && !steps.isEmpty()) {
+            LinearLayout list = ui.col();
+            list.setPadding(ui.dp(4), ui.dp(16), 0, 0);
+            for (int i = 0; i < steps.size(); i++) list.addView(stepRow(steps.get(i), i < index ? 2 : i == index ? 1 : 0));
+            body.addView(list, ui.full());
         }
-        TextView hint = ui.small("Your answers are being typed into the USSD menu behind this screen.");
-        hint.setGravity(Gravity.CENTER);
-        hint.setPadding(ui.dp(24), ui.dp(32), ui.dp(24), 0);
-        body.addView(hint, ui.full());
-        setPage(frame(body, null, true), false);
+        sheet(body, null, false, true);
     }
 
-    /**
-     * Shows a USSD screen as a clean page: the question, the options as buttons, and a keypad.
-     * @param pin show a PIN pad (masked, screenshot-blocked)
-     */
+    /** state: 0 upcoming, 1 now, 2 done. */
+    private View stepRow(String step, int state) {
+        LinearLayout r = ui.row();
+        r.setPadding(0, ui.dp(7), 0, ui.dp(7));
+        FrameLayout dot = new FrameLayout(c);
+        int bg = state == 2 ? ui.successContainer : state == 1 ? ui.primaryContainer : ui.surfaceHigh;
+        dot.setBackground(ui.shape(bg, 13));
+        if (state == 2) {
+            dot.addView(ui.icon(R.drawable.ic_check, ui.onSuccessContainer, 16), new FrameLayout.LayoutParams(ui.dp(16), ui.dp(16), Gravity.CENTER));
+        } else if (state == 1) {
+            View d = new View(c);
+            d.setBackground(ui.shape(ui.primary, 5));
+            dot.addView(d, new FrameLayout.LayoutParams(ui.dp(10), ui.dp(10), Gravity.CENTER));
+        }
+        r.addView(dot, new LinearLayout.LayoutParams(ui.dp(26), ui.dp(26)));
+        TextView t = ui.text(StepEngine.describe(step), 15, state == 0 ? ui.onSurfaceVariant : ui.onSurface);
+        if (state == 1) t.setTypeface(medium);
+        t.setPadding(ui.dp(14), 0, 0, 0);
+        r.addView(t, Ui.weight());
+        return r;
+    }
+
+    /** A USSD screen as a clean page: question, options as buttons, keypad or PIN pad. */
     void ask(String screenText, String note, boolean hasInput, boolean pin) {
         wipe();
         pinMode = pin;
@@ -210,122 +268,147 @@ final class Skin {
 
         LinearLayout body = ui.col();
         if (note != null && !note.isEmpty() && !"Your turn".equals(note) && !"Enter your PIN".equals(note)) {
-            TextView n = ui.badge(note, ui.tertiaryContainer, ui.onTertiaryContainer);
-            n.setPadding(ui.dp(12), ui.dp(6), ui.dp(12), ui.dp(6));
-            body.addView(n, ui.wrap(0));
+            LinearLayout n = ui.row();
+            n.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
+            n.setBackground(ui.shape(ui.tertiaryContainer, 14));
+            n.addView(ui.icon(R.drawable.ic_info, ui.onTertiaryContainer, 18));
+            TextView nt = ui.text(note, 13, ui.onTertiaryContainer);
+            nt.setPadding(ui.dp(8), 0, 0, 0);
+            n.addView(nt, Ui.weight());
+            body.addView(n, ui.full());
             body.addView(ui.space(12));
         }
 
+        View footer = null;
         if (pin) {
-            TextView lock = ui.text("🔒", 34, ui.primary);
-            lock.setGravity(Gravity.CENTER);
-            lock.setPadding(0, ui.dp(12), 0, 0);
-            body.addView(lock, ui.full());
-            TextView h = ui.title("Enter your PIN");
-            h.setGravity(Gravity.CENTER);
-            h.setPadding(0, ui.dp(8), 0, ui.dp(6));
-            body.addView(h, ui.full());
-            TextView m = ui.body(message);
-            m.setGravity(Gravity.CENTER);
-            m.setMaxLines(6);
-            body.addView(m, ui.full());
+            LinearLayout headRow = ui.row();
+            headRow.addView(ui.iconTile(R.drawable.ic_lock, ui.primaryContainer, ui.onPrimaryContainer, 44));
+            LinearLayout ht = ui.col();
+            ht.setPadding(ui.dp(14), 0, 0, 0);
+            ht.addView(ui.title("Enter your PIN"));
+            TextView m = ui.small(message);
+            m.setMaxLines(4);
+            m.setEllipsize(TextUtils.TruncateAt.END);
+            ht.addView(m);
+            headRow.addView(ht, Ui.weight());
+            body.addView(headRow, ui.full());
+            LinearLayout f = ui.col();
+            dots = ui.row();
+            dots.setGravity(Gravity.CENTER);
+            dots.setMinimumHeight(ui.dp(40));
+            f.addView(dots, ui.full());
+            f.addView(keypad("Confirm"), ui.full(8));
+            TextView privacy = ui.small("Goes straight into the USSD menu. Never saved, shown or logged.");
+            privacy.setGravity(Gravity.CENTER);
+            privacy.setPadding(0, ui.dp(10), 0, 0);
+            f.addView(privacy, ui.full());
+            footer = f;
+            refreshInput();
         } else {
-            LinearLayout q = ui.card(ui.surfaceContainer);
             TextView m = ui.text(message.isEmpty() ? "Choose an option" : message, 18, ui.onSurface);
-            q.addView(m);
-            body.addView(q, ui.full());
-        }
-
-        boolean showKeypad = hasInput && (pin || options.isEmpty());
-        if (!options.isEmpty() && hasInput && !pin) {
-            body.addView(ui.space(12));
-            for (StepEngine.Option o : options) body.addView(optionRow(o), ui.full(8));
-            TextView other = ui.textButton("Type a different answer", null);
-            LinearLayout typeArea = ui.col();
-            typeArea.setVisibility(View.GONE);
-            typeArea.addView(inputBox(false), ui.full(8));
-            typeArea.addView(keypad(), ui.full(8));
-            other.setOnClickListener(v -> {
-                typeArea.setVisibility(View.VISIBLE);
-                other.setVisibility(View.GONE);
-            });
-            body.addView(other, ui.wrap(0));
-            body.addView(typeArea, ui.full());
-        }
-        View bottom = null;
-        if (showKeypad) {
-            LinearLayout b = ui.col();
-            b.addView(inputBox(pin), ui.full());
-            b.addView(keypad(), ui.full(10));
-            if (pin) {
-                TextView privacy = ui.small("Your PIN goes straight into the USSD menu. It isn't saved, shown or logged.");
-                privacy.setGravity(Gravity.CENTER);
-                privacy.setPadding(0, ui.dp(10), 0, 0);
-                b.addView(privacy, ui.full());
+            m.setLineSpacing(0, 1.2f);
+            body.addView(m, ui.full());
+            if (!options.isEmpty() && hasInput) {
+                LinearLayout list = ui.col();
+                list.setBackground(ui.shape(ui.surfaceContainer, 22));
+                list.setClipToOutline(true);
+                for (int i = 0; i < options.size(); i++) {
+                    if (i > 0) {
+                        View line = new View(c);
+                        line.setBackgroundColor(ui.outlineVariant);
+                        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1);
+                        llp.setMarginStart(ui.dp(64));
+                        list.addView(line, llp);
+                    }
+                    list.addView(optionRow(options.get(i)), ui.full());
+                }
+                body.addView(list, ui.full(14));
+                TextView other = ui.iconText(ui.textButton("Type a different answer", null), R.drawable.ic_dialpad);
+                LinearLayout typeArea = ui.col();
+                typeArea.setVisibility(View.GONE);
+                typeArea.addView(inputBox(), ui.full(4));
+                typeArea.addView(keypad("Send"), ui.full(8));
+                other.setOnClickListener(v -> {
+                    typeArea.setVisibility(View.VISIBLE);
+                    other.setVisibility(View.GONE);
+                });
+                body.addView(other, ui.wrap(0));
+                body.addView(typeArea, ui.full());
+            } else if (hasInput) {
+                LinearLayout f = ui.col();
+                f.addView(inputBox(), ui.full());
+                f.addView(keypad("Send"), ui.full(8));
+                footer = f;
+            } else {
+                footer = ui.filled("OK", v -> cb.onDone());
             }
-            bottom = b;
-        } else if (!hasInput) {
-            body.addView(ui.space(16));
-            body.addView(ui.filled("OK", v -> cb.onDone()), ui.full());
         }
-        setPage(frame(body, bottom, true), pin);
+        sheet(body, footer, pin, true);
     }
 
     private View optionRow(StepEngine.Option o) {
         LinearLayout r = ui.row();
-        r.setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(12));
-        r.setBackground(ui.ripple(ui.surfaceLow, 18));
-        GradientDrawableHolder.stroke(r, ui);
+        r.setPadding(ui.dp(14), ui.dp(12), ui.dp(10), ui.dp(12));
+        r.setMinimumHeight(ui.dp(56));
+        r.setBackground(ui.ripple(0x00000000, 0));
         TextView n = ui.text(o.num, 15, ui.onPrimaryContainer);
-        n.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        n.setTypeface(medium);
         n.setGravity(Gravity.CENTER);
-        n.setBackground(ui.shape(ui.primaryContainer, 18));
+        n.setBackground(ui.shape(ui.primaryContainer, 12));
         r.addView(n, new LinearLayout.LayoutParams(ui.dp(36), ui.dp(36)));
-        TextView l = ui.text(o.label, 17, ui.onSurface);
-        l.setPadding(ui.dp(14), 0, 0, 0);
+        TextView l = ui.text(o.label, 16, ui.onSurface);
+        l.setPadding(ui.dp(14), 0, ui.dp(8), 0);
         r.addView(l, Ui.weight());
-        r.addView(ui.text("›", 22, ui.onSurfaceVariant));
-        r.setClickable(true);
-        r.setContentDescription("Option " + o.num + ": " + o.label);
+        r.addView(ui.icon(R.drawable.ic_chevron, ui.onSurfaceVariant, 20));
+        r.setContentDescription("Option " + o.num + ", " + o.label);
         r.setOnClickListener(v -> answer(o.num.toCharArray()));
         return r;
     }
 
-    private View inputBox(boolean pin) {
-        inputView = ui.text(pin ? "" : "", pin ? 30 : 26, ui.onSurface);
+    private View inputBox() {
+        inputView = ui.text("", 26, ui.onSurface);
+        inputView.setTypeface(medium);
         inputView.setGravity(Gravity.CENTER);
-        inputView.setLetterSpacing(pin ? 0.4f : 0.05f);
-        inputView.setMinHeight(ui.dp(60));
+        inputView.setLetterSpacing(0.04f);
+        inputView.setMinHeight(ui.dp(58));
         inputView.setBackground(ui.shape(ui.surfaceContainer, 18));
-        inputView.setHint(pin ? "• • • •" : "Your answer");
+        inputView.setHint("Your answer");
         inputView.setHintTextColor(ui.outline);
         refreshInput();
         return inputView;
     }
 
-    private View keypad() {
+    private static final String[] LETTERS = {"", "ABC", "DEF", "GHI", "JKL", "MNO", "PQRS", "TUV", "WXYZ"};
+
+    private View keypad(String sendLabel) {
         LinearLayout pad = ui.col();
-        String[][] keys = {{"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"*", "0", "#"}};
-        for (String[] rowKeys : keys) {
-            LinearLayout r = ui.row();
-            for (int i = 0; i < 3; i++) {
-                final String k = rowKeys[i];
-                TextView key = ui.text(k, 24, ui.onSurface);
-                key.setGravity(Gravity.CENTER);
-                key.setBackground(ui.ripple(ui.surfaceHigh, 18));
-                key.setOnClickListener(v -> press(k.charAt(0)));
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ui.dp(54), 1);
-                if (i > 0) lp.setMarginStart(ui.dp(8));
-                r.addView(key, lp);
+        String[] keys = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"};
+        LinearLayout r = null;
+        for (int i = 0; i < keys.length; i++) {
+            if (i % 3 == 0) {
+                r = ui.row();
+                pad.addView(r, ui.full(i == 0 ? 0 : 8));
             }
-            pad.addView(r, ui.full(8));
+            final String k = keys[i];
+            LinearLayout key = ui.col();
+            key.setGravity(Gravity.CENTER);
+            key.setBackground(ui.ripple(ui.surfaceHigh, 16));
+            TextView d = ui.text(k, 24, ui.onSurface);
+            d.setGravity(Gravity.CENTER);
+            key.addView(d);
+            if (i < 9 && i > 0) {
+                TextView letters = ui.text(LETTERS[i], 9, ui.onSurfaceVariant);
+                letters.setLetterSpacing(0.15f);
+                key.addView(letters);
+            }
+            key.setContentDescription(k);
+            key.setOnClickListener(v -> press(k.charAt(0)));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ui.dp(54), 1);
+            if (i % 3 > 0) lp.setMarginStart(ui.dp(8));
+            r.addView(key, lp);
         }
         LinearLayout last = ui.row();
-        TextView del = ui.text("⌫", 22, ui.onSurface);
-        del.setGravity(Gravity.CENTER);
-        del.setContentDescription("Delete");
-        del.setBackground(ui.ripple(ui.surfaceContainer, 18));
-        del.setOnClickListener(v -> {
+        ImageView del = ui.iconButton(R.drawable.ic_backspace, ui.onSurface, ui.surfaceContainer, "Delete", v -> {
             if (len > 0) buf[--len] = '\0';
             refreshInput();
         });
@@ -334,12 +417,13 @@ final class Skin {
             refreshInput();
             return true;
         });
+        del.setBackground(ui.ripple(ui.surfaceContainer, 16));
         last.addView(del, new LinearLayout.LayoutParams(0, ui.dp(54), 1));
-        TextView send = ui.filled("Send", v -> {
+        TextView send = ui.iconText(ui.filled(sendLabel, v -> {
             if (len == 0) return;
             answer(Arrays.copyOf(buf, len));
-        });
-        send.setTextSize(17);
+        }), R.drawable.ic_send);
+        send.setBackground(ui.ripple(ui.primary, 16));
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, ui.dp(54), 2);
         slp.setMarginStart(ui.dp(8));
         last.addView(send, slp);
@@ -353,19 +437,36 @@ final class Skin {
     }
 
     private void refreshInput() {
-        if (inputView == null) return;
-        if (pinMode) {
-            StringBuilder dots = new StringBuilder();
-            for (int i = 0; i < len; i++) dots.append('•');
-            inputView.setText(dots);
-        } else {
+        if (pinMode && dots != null) {
+            dots.removeAllViews();
+            int n = Math.max(4, len);
+            for (int i = 0; i < n; i++) {
+                View d = new View(c);
+                android.graphics.drawable.GradientDrawable g = ui.shape(i < len ? ui.primary : 0x00000000, 8);
+                if (i >= len) g.setStroke(ui.dp(2), ui.outline);
+                d.setBackground(g);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ui.dp(16), ui.dp(16));
+                lp.setMarginStart(ui.dp(i == 0 ? 0 : 14));
+                dots.addView(d, lp);
+            }
+        } else if (inputView != null) {
             inputView.setText(new String(buf, 0, len));
         }
     }
 
+    private ValueCallback valueCb;
+
     private void answer(char[] value) {
         boolean pin = pinMode;
         wipe();
+        if (valueCb != null) {
+            ValueCallback v = valueCb;
+            valueCb = null;
+            String s = new String(value);
+            Arrays.fill(value, '\0');
+            v.onValue(s);
+            return;
+        }
         cb.onAnswer(value, pin);
     }
 
@@ -375,99 +476,132 @@ final class Skin {
         if (inputView != null) inputView.setText("");
     }
 
-    /** Final page with the reply, the amounts / references we found, and next actions. */
-    void result(boolean ok, String text, boolean canSaveRoute, int routeSteps) {
+    /** Before dialling (widget runs): ask for {PHONE} or {AMOUNT} on the keypad. */
+    void askValue(String title, String code, String label, String help, String prefill, ValueCallback cb) {
+        this.title = title;
+        this.subtitle = code;
         wipe();
         pinMode = false;
+        dots = null;
         LinearLayout body = ui.col();
-        body.setPadding(0, ui.dp(16), 0, 0);
-        TextView mark = ui.text(ok ? "✓" : "!", 30, ok ? ui.onSuccessContainer : ui.onErrorContainer);
-        mark.setGravity(Gravity.CENTER);
-        mark.setBackground(ui.shape(ok ? ui.successContainer : ui.errorContainer, 36));
-        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(ui.dp(72), ui.dp(72));
-        mlp.gravity = Gravity.CENTER_HORIZONTAL;
-        body.addView(mark, mlp);
-        TextView h = ui.title(ok ? "Done" : "Stopped");
-        h.setGravity(Gravity.CENTER);
-        h.setPadding(0, ui.dp(14), 0, ui.dp(14));
-        body.addView(h, ui.full());
-        LinearLayout card = ui.card(ui.surfaceContainer);
-        TextView msg = ui.text(text, 17, ui.onSurface);
-        msg.setTextIsSelectable(false);
-        card.addView(msg);
-        List<String> amounts = Reply.amounts(text);
-        List<String> refs = Reply.references(text);
-        if (!amounts.isEmpty() || !refs.isEmpty()) {
-            LinearLayout chips = ui.row();
-            chips.setPadding(0, ui.dp(12), 0, 0);
-            for (String a : amounts) chips.addView(ui.badge(a, ui.primaryContainer, ui.onPrimaryContainer), ui.wrap(chips.getChildCount() == 0 ? 0 : 6));
-            for (String r : refs) chips.addView(ui.badge("Ref " + r, ui.tertiaryContainer, ui.onTertiaryContainer), ui.wrap(chips.getChildCount() == 0 ? 0 : 6));
-            card.addView(chips);
-        }
-        body.addView(card, ui.full());
+        body.addView(ui.title(label));
+        TextView h = ui.small(help);
+        h.setPadding(0, ui.dp(4), 0, 0);
+        body.addView(h);
+        LinearLayout f = ui.col();
+        f.addView(inputBox(), ui.full());
+        f.addView(keypad("Continue"), ui.full(8));
+        if (prefill != null) for (char ch : prefill.toCharArray()) press(ch);
+        valueCb = cb;
+        sheet(body, f, false, false);
+    }
 
-        LinearLayout bottom = ui.col();
-        if (canSaveRoute) {
-            TextView save = ui.tonal("Save these " + routeSteps + " steps as an action", v -> cb.onSaveRoute());
-            bottom.addView(save, ui.full());
-            TextView why = ui.small("Next time it can run this path for you. Your PIN is saved as {PIN}, never the digits.");
-            why.setGravity(Gravity.CENTER);
-            why.setPadding(0, ui.dp(6), 0, ui.dp(10));
-            bottom.addView(why, ui.full());
+    /** Final page: the reply, amounts / references found, and what to do next. */
+    void result(boolean ok, String text, boolean canSave, int steps) {
+        wipe();
+        pinMode = false;
+        valueCb = null;
+        LinearLayout body = ui.col();
+        LinearLayout top = ui.row();
+        top.addView(ui.iconTile(ok ? R.drawable.ic_check : R.drawable.ic_alert, ok ? ui.successContainer : ui.errorContainer,
+                ok ? ui.onSuccessContainer : ui.onErrorContainer, 44));
+        LinearLayout tt = ui.col();
+        tt.setPadding(ui.dp(14), 0, 0, 0);
+        tt.addView(ui.title(ok ? "Done" : "Stopped"));
+        tt.addView(ui.small(ok ? "Here's what the network replied" : "The session ended"));
+        top.addView(tt, Ui.weight());
+        body.addView(top, ui.full());
+        body.addView(Ui.replyCard(ui, text), ui.full(14));
+
+        LinearLayout footer = ui.col();
+        if (canSave) {
+            LinearLayout saveRow = ui.row();
+            saveRow.setPadding(ui.dp(14), ui.dp(12), ui.dp(14), ui.dp(12));
+            saveRow.setBackground(ui.shape(ui.secondaryContainer, 18));
+            saveRow.addView(ui.icon(R.drawable.ic_record, ui.onSecondaryContainer, 22));
+            LinearLayout st = ui.col();
+            st.setPadding(ui.dp(12), 0, ui.dp(8), 0);
+            TextView s1 = ui.text("Save as a command", 15, ui.onSecondaryContainer);
+            s1.setTypeface(medium);
+            st.addView(s1);
+            TextView s2 = ui.text(steps + " steps · run it next time in one tap", 12, ui.onSecondaryContainer);
+            st.addView(s2);
+            saveRow.addView(st, Ui.weight());
+            TextView save = ui.filled("Save", null);
+            save.setOnClickListener(v -> {
+                String name = cb.onSaveRoute();
+                if (name != null) {
+                    s1.setText("Saved as “" + name + "”");
+                    s2.setText("Find it in Record and on Home");
+                    save.setVisibility(View.GONE);
+                }
+            });
+            saveRow.addView(save);
+            footer.addView(saveRow, ui.full());
         }
-        bottom.addView(ui.filled("Done", v -> cb.onDone()), ui.full());
-        setPage(frame(body, bottom, false), false);
+        LinearLayout buttons = ui.row();
+        buttons.setPadding(0, ui.dp(canSave ? 12 : 0), 0, 0);
+        TextView copy = ui.iconText(ui.tonal("Copy", v -> {
+            ClipboardManager cm = (ClipboardManager) c.getSystemService(Context.CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(ClipData.newPlainText("USSD reply", text));
+            Toast.makeText(c, "Reply copied", Toast.LENGTH_SHORT).show();
+        }), R.drawable.ic_copy);
+        buttons.addView(copy, Ui.weight());
+        TextView done = ui.filled("Done", v -> cb.onDone());
+        LinearLayout.LayoutParams dlp = Ui.weight();
+        dlp.setMarginStart(ui.dp(10));
+        buttons.addView(done, dlp);
+        footer.addView(buttons, ui.full());
+        sheet(body, footer, false, false);
     }
 
     // --------------------------------------------------------------- banner
 
-    /** Small card at the top, used when the phone's own pop-up should stay visible. */
-    void banner(String head, String text, boolean ended, Runnable action) {
+    /** Floating card at the bottom, used when the phone's own pop-up should stay visible. */
+    void banner(String head, String text, boolean ended, String actionLabel, Runnable action) {
         removeCover();
         removeBanner();
-        LinearLayout card = ui.card(ui.dark ? ui.surfaceHigh : 0xFF2B2B31);
-        card.setElevation(ui.dp(6));
-        LinearLayout r = ui.row();
-        if (!ended) {
+        LinearLayout card = ui.row();
+        card.setPadding(ui.dp(16), ui.dp(12), ui.dp(8), ui.dp(12));
+        card.setBackground(ui.shape(ui.dark ? ui.surfaceHigh : 0xFF2B2B31, 22));
+        card.setElevation(ui.dp(8));
+        if (ended) {
+            card.addView(ui.icon(R.drawable.ic_check, 0xFF7DDA9C, 22));
+        } else {
             ProgressBar spin = new ProgressBar(c);
-            r.addView(spin, new LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)));
+            spin.setIndeterminateTintList(ColorStateList.valueOf(0xFFB8C4FF));
+            card.addView(spin, new LinearLayout.LayoutParams(ui.dp(22), ui.dp(22)));
         }
-        TextView t = ui.text(head, 15, 0xFFFFFFFF);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setPadding(ended ? 0 : ui.dp(10), 0, 0, 0);
-        r.addView(t, Ui.weight());
-        TextView act = ui.text(ended ? "Open" : "Stop", 15, ui.dark ? ui.primary : 0xFFB8C4FF);
-        act.setPadding(ui.dp(12), ui.dp(6), ui.dp(4), ui.dp(6));
-        act.setOnClickListener(v -> action.run());
-        r.addView(act);
-        card.addView(r);
-        TextView b = ui.text(text, 14, 0xFFDADAE0);
-        b.setMaxLines(5);
+        LinearLayout tt = ui.col();
+        tt.setPadding(ui.dp(12), 0, ui.dp(8), 0);
+        TextView t = ui.text(head, 14, 0xFFFFFFFF);
+        t.setTypeface(medium);
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        tt.addView(t);
+        TextView b = ui.text(text, 13, 0xFFC9C9D1);
+        b.setMaxLines(3);
         b.setEllipsize(TextUtils.TruncateAt.END);
-        b.setPadding(0, ui.dp(4), 0, 0);
-        card.addView(b);
+        tt.addView(b);
+        card.addView(tt, Ui.weight());
+        TextView act = ui.text(actionLabel, 14, 0xFFB8C4FF);
+        act.setTypeface(medium);
+        act.setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8));
+        act.setBackground(ui.ripple(0x00000000, 16));
+        act.setOnClickListener(v -> action.run());
+        card.addView(act);
         LinearLayout wrap = ui.col();
-        wrap.setPadding(ui.dp(12), ui.dp(40), ui.dp(12), 0);
+        wrap.setPadding(ui.dp(12), 0, ui.dp(12), ui.dp(24));
         wrap.addView(card, ui.full());
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
-        lp.gravity = Gravity.TOP;
+        lp.gravity = Gravity.BOTTOM;
         try {
             wm.addView(wrap, lp);
             banner = wrap;
         } catch (RuntimeException ignored) {
-        }
-    }
-
-    /** Adds a thin outline to option rows without another drawable class. */
-    private static final class GradientDrawableHolder {
-        static void stroke(View v, Ui ui) {
-            android.graphics.drawable.GradientDrawable d = ui.shape(ui.surfaceLow, 18);
-            d.setStroke(ui.dp(1), ui.outlineVariant);
-            int r = (ui.onSurface & 0x00FFFFFF) | 0x22000000;
-            v.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(r), d, ui.shape(0xFFFFFFFF, 18)));
         }
     }
 }

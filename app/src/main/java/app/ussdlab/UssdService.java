@@ -1,13 +1,19 @@
 package app.ussdlab;
 
+import android.Manifest;
 import android.accessibilityservice.AccessibilityService;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Reads USSD pop-ups and answers them. It only acts while a run you started is in progress.
@@ -18,9 +24,7 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
     public interface Listener { void onJobFinished(Job job); }
 
     static UssdService instance;
-    static final String EXTRA_ROUTE = "route";
-    static final String EXTRA_ROUTE_CODE = "route_code";
-    static final String EXTRA_ROUTE_TITLE = "route_title";
+    static final String EXTRA_EDIT = "edit_action";
 
     private final Handler h = new Handler(Looper.getMainLooper());
     private Skin skin;
@@ -35,6 +39,7 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
     private String waitingOn;
     private boolean waitingPinStep;
     private String lastHeard;
+    private String savedId;
 
     private static final long SETTLE_MS = 350;
     private static final long STUCK_MS = 8000;
@@ -59,11 +64,13 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
     @Override protected void onServiceConnected() {
         instance = this;
         skin = new Skin(this, this);
+        Widget.refresh(this);
     }
 
     @Override public boolean onUnbind(Intent intent) {
         if (isBusy()) finish(false, "Automation was switched off");
         instance = null;
+        Widget.refresh(this);
         return super.onUnbind(intent);
     }
 
@@ -79,7 +86,8 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
 
     // ---------------------------------------------------------------- start
 
-    public void begin(Job j, Listener l) {
+    /** Starts watching for the USSD pop-up. Call just before dialling. */
+    public void begin(Job j, Listener l, String simLabel) {
         if (isBusy()) finish(false, "Replaced by a new run");
         h.removeCallbacksAndMessages(null);
         job = j;
@@ -88,19 +96,77 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
         lastLogged = null;
         sawDialog = false;
         waitingOn = null;
+        savedId = null;
         switch (j.mode) {
             case CUSTOM:
-                skin.start(j.title, j.code);
+                skin.start(j.title, j.code, simLabel);
                 break;
             case AUTOPILOT:
-                skin.banner("Auto-pilot · " + j.title, "Dialling " + j.code + "…", false, this::onCancel);
+                skin.banner("Auto-pilot · " + j.title, "Dialling " + j.code + "…", false, "Stop", this::onCancel);
                 break;
             case WATCH:
-                skin.banner("Recording · " + j.title, "Use the menu as normal. Each screen is saved to History.", false, this::onCancel);
+                skin.banner(j.title, "Use the menu as normal. Each screen is saved to History.", false, "Stop", this::onCancel);
                 h.postDelayed(() -> { if (isBusy() && job.mode == Job.Mode.WATCH) skin.hide(); }, 3500);
                 break;
         }
         h.postDelayed(stepTimeout, STEP_TIMEOUT_MS);
+    }
+
+    /**
+     * Runs a saved action without opening the app (home-screen widget, shortcuts).
+     * Missing {PHONE}/{AMOUNT} values are asked for on the custom sheet first.
+     */
+    public void launch(Store.Action a) {
+        Store store = Store.get(this);
+        if (checkSelfPermission(Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
+            store.setWidgetStatus("Open the app to allow phone access");
+            Widget.refresh(this);
+            return;
+        }
+        List<String> steps = StepEngine.parse(a.steps);
+        List<String> keys = new ArrayList<>();
+        if (StepEngine.uses(steps, "{PHONE}")) keys.add("PHONE");
+        if (StepEngine.uses(steps, "{AMOUNT}")) keys.add("AMOUNT");
+        askValues(a, steps, keys, 0, new HashMap<>());
+    }
+
+    private void askValues(Store.Action a, List<String> steps, List<String> keys, int i, Map<String, String> vars) {
+        if (i >= keys.size()) {
+            startFromBackground(a, steps, vars);
+            return;
+        }
+        String k = keys.get(i);
+        boolean phone = k.equals("PHONE");
+        Store store = Store.get(this);
+        skin.askValue(a.title(), a.code, phone ? "Phone number" : "Amount",
+                phone ? "Who it's for. Used wherever the steps say {PHONE}." : "Used wherever the steps say {AMOUNT}.",
+                store.var(k), v -> {
+                    String val = phone ? v.replaceAll("[^0-9+]", "") : v.trim();
+                    if (val.isEmpty()) {
+                        askValues(a, steps, keys, i, vars);
+                        return;
+                    }
+                    store.setVar(k, val);
+                    vars.put(k, val);
+                    askValues(a, steps, keys, i + 1, vars);
+                });
+    }
+
+    private void startFromBackground(Store.Action a, List<String> steps, Map<String, String> vars) {
+        Store store = Store.get(this);
+        Sims.Sim sim = Sims.selected(this);
+        Job.Mode mode = Store.PHONE.equals(a.mode) ? Job.Mode.WATCH
+                : Store.AUTOPILOT.equals(a.mode) || !store.cover() ? Job.Mode.AUTOPILOT : Job.Mode.CUSTOM;
+        Job j = new Job(a.title(), a.code, steps, vars, null, mode);
+        j.actionId = a.id;
+        begin(j, null, sim == null ? null : sim.label);
+        store.setWidgetStatus("Running " + a.title() + "…");
+        Widget.refresh(this);
+        try {
+            Sims.dial(this, a.code, sim);
+        } catch (RuntimeException e) {
+            finish(false, "Couldn't dial: " + e.getMessage());
+        }
     }
 
     // --------------------------------------------------------------- events
@@ -122,7 +188,8 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
         Screen s = Screen.read(this);
         if (s == null || s.busy || s.text.isEmpty() || s.text.equals(lastHeard)) return;
         lastHeard = s.text;
-        Store.get(this).addRun("Heard on screen", "listen", true, s.text, "◀ [" + s.pkg + "] " + s.text);
+        Store.get(this).addRun("Heard on screen", "listen", true, s.text, "◀ " + s.text);
+        Widget.refresh(this);
     }
 
     private void processScreen() {
@@ -144,7 +211,6 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
             lastLogged = s.text;
         }
 
-        // Custom screen is showing a question: only react if the pop-up changed under it.
         if (waitingOn != null) {
             if (waitingOn.equals(s.text)) return;
             if (s.input == null) {
@@ -185,10 +251,9 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
                     return;
                 }
                 if (job.mode == Job.Mode.CUSTOM) {
-                    skin.progress(a.note != null && a.note.startsWith("picked") ? "Choosing " + a.note.substring(7) : "Sending " + a.display(),
-                            job.progress(), job.fraction());
+                    skin.progress(job.steps, job.index, "Working on it", job.progress());
                 } else {
-                    skin.banner("Auto-pilot · " + job.progress(), "Sent " + a.display(), false, this::onCancel);
+                    skin.banner("Auto-pilot · " + job.progress(), StepEngine.describe(job.steps.get(job.index - 1)), false, "Stop", this::onCancel);
                 }
                 break;
         }
@@ -208,7 +273,7 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
         return true;
     }
 
-    /** Automation can't continue on its own: ask the user (custom screen) or reveal the pop-up. */
+    /** Automation can't continue on its own: ask on the custom sheet, or reveal the pop-up. */
     private void handOver(Screen s, String why, boolean pinStep) {
         if (!isBusy()) return;
         if (!pinStep) job.manual = true;
@@ -220,8 +285,8 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
         } else {
             job.mode = Job.Mode.WATCH;
             job.wipe();
-            skin.banner("Your turn", why + ". Finish in the menu below.", true, this::onShowPhone);
-            h.postDelayed(() -> { if (isBusy() && job.mode == Job.Mode.WATCH) skin.hide(); }, 4000);
+            skin.banner("Your turn", why + ". Finish in the menu above.", true, "Hide", () -> skin.hide());
+            h.postDelayed(() -> { if (isBusy() && job.mode == Job.Mode.WATCH) skin.hide(); }, 5000);
             h.postDelayed(userTimeout, USER_TIMEOUT_MS);
         }
     }
@@ -234,7 +299,7 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
         h.postDelayed(userTimeout, USER_TIMEOUT_MS);
     }
 
-    // ----------------------------------------------------- custom screen input
+    // ----------------------------------------------------- custom sheet input
 
     @Override public void onAnswer(char[] value, boolean pin) {
         if (!isBusy()) {
@@ -274,7 +339,7 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
             handOver(s, "Couldn't type into the menu on this phone", false);
             return;
         }
-        skin.progress(pin ? "Checking your PIN" : "Sending your answer", "Waiting for the network…", -1);
+        skin.progress(null, 0, pin ? "Checking your PIN" : "Sending your answer", "Waiting for the network…");
     }
 
     @Override public void onCancel() {
@@ -282,9 +347,8 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
             Screen s = Screen.read(this);
             if (s != null) s.clickCancel();
             finish(false, "Cancelled");
-        } else {
-            skin.hide();
         }
+        skin.hide();
     }
 
     @Override public void onShowPhone() {
@@ -293,32 +357,27 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
             job.manual = true;
             job.wipe();
             waitingOn = null;
-            job.log("✋ Switched to the phone's view");
+            job.log("✋ Switched to the phone's pop-up");
             skin.hide();
             h.removeCallbacks(userTimeout);
             h.postDelayed(userTimeout, USER_TIMEOUT_MS);
         } else {
             skin.hide();
-            openApp(null);
         }
     }
 
     @Override public void onDone() { skin.hide(); }
 
-    @Override public void onSaveRoute() {
-        skin.hide();
-        if (job == null) return;
-        Intent i = new Intent();
-        i.putExtra(EXTRA_ROUTE, String.join(", ", job.route));
-        i.putExtra(EXTRA_ROUTE_CODE, job.code);
-        i.putExtra(EXTRA_ROUTE_TITLE, job.title);
-        openApp(i);
-    }
-
-    private void openApp(Intent extras) {
-        Intent i = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        if (extras != null) i.putExtras(extras);
-        startActivity(i);
+    @Override public String onSaveRoute() {
+        if (job == null || job.route.isEmpty()) return null;
+        Store store = Store.get(this);
+        String name = job.recordName != null && !job.recordName.isEmpty() ? job.recordName : job.title + " (recorded)";
+        Store.Action a = Store.Action.make(name, job.code, String.join(", ", job.route), Store.CUSTOM);
+        a.recorded = true;
+        store.upsert(a);
+        savedId = a.id;
+        Widget.refresh(this);
+        return name;
     }
 
     // ---------------------------------------------------------------- finish
@@ -335,14 +394,17 @@ public class UssdService extends AccessibilityService implements Skin.Callbacks 
         h.removeCallbacks(userTimeout);
         h.removeCallbacks(goneCheck);
         h.removeCallbacks(process);
-        Store.get(this).addRun(job.title, job.mode.name().toLowerCase(), ok, message, job.log());
+        Store store = Store.get(this);
+        store.addRun(job.title, job.mode.name().toLowerCase(), ok, message, job.log(), job.actionId);
+        store.setWidgetStatus("");
+        Widget.refresh(this);
         Job finished = job;
         boolean canSave = finished.userAnswers > 0 && !finished.route.isEmpty();
         if (finished.mode == Job.Mode.CUSTOM || skin.coverShowing()) {
             skin.result(ok, message, canSave, finished.route.size());
         } else {
-            skin.banner(ok ? "Done · " + finished.title : "Stopped · " + finished.title, message, true, () -> onShowPhone());
-            h.postDelayed(() -> { if (!isBusy()) skin.hide(); }, 6000);
+            skin.banner(ok ? "Done · " + finished.title : "Stopped · " + finished.title, message, true, "OK", () -> skin.hide());
+            h.postDelayed(() -> { if (!isBusy()) skin.hide(); }, 7000);
         }
         if (listener != null) listener.onJobFinished(finished);
         listener = null;
